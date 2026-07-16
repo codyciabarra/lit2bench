@@ -486,20 +486,21 @@ pick_flanking_exons <- function(exon_table, ce_start, ce_end, strand = "+") {
 # 5. Assemble the assay list that primer_schematic.R's build_html() expects
 # --------------------------------------------------------------------------
 build_assay <- function(meta, primers, features, canonical_size, ce_lengths, geometry = NULL) {
+  factor <- meta$factor %||% "TDP-43"
   ce_sorted <- sort(ce_lengths)
   tags <- c("major", "minor")
   kinds <- c("ce_major", "ce_minor")
   products <- list(list(label = "Canonical mRNA (CE excluded)", size = canonical_size,
-                         cond = "TDP-43 present", kind = "canon"))
+                         cond = sprintf("%s present", factor), kind = "canon"))
   for (i in seq_along(ce_sorted)) {
     tag_idx <- min(i, 2)
     products[[length(products) + 1]] <- list(
       label = sprintf("CE included \u2014 %s (%d-bp CE)", tags[tag_idx], ce_sorted[i]),
-      size = canonical_size + ce_sorted[i], cond = "TDP-43 depleted", kind = kinds[tag_idx]
+      size = canonical_size + ce_sorted[i], cond = sprintf("%s depleted", factor), kind = kinds[tag_idx]
     )
   }
   list(
-    title = meta$title, subtitle = meta$subtitle, gene = meta$gene,
+    title = meta$title, subtitle = meta$subtitle, gene = meta$gene, factor = factor,
     assembly = meta$assembly, citation = meta$citation, doi = meta$doi,
     primers = list(
       fwd = list(name = "FWD", seq = primers$fwd_seq, binds = meta$upstream_exon_name,
@@ -540,7 +541,7 @@ design_from_coords <- function(gene, assembly, chrom, strand,
                                 upstream_exon, downstream_exon, ce_lengths,
                                 citation, doi, title = NULL, subtitle = NULL,
                                 flank = 140, product_size_range = DEFAULT_PRODUCT_SIZE_RANGE,
-                                upstream_seq = NULL, downstream_seq = NULL) {
+                                upstream_seq = NULL, downstream_seq = NULL, factor = "TDP-43") {
   plus_window <- NULL; window_start <- NULL
 
   if (is.null(upstream_seq) || is.null(downstream_seq)) {
@@ -604,9 +605,9 @@ design_from_coords <- function(gene, assembly, chrom, strand,
             else sprintf("%s cryptic-exon detection by RT-PCR", gene),
     subtitle = if (!is.null(subtitle)) subtitle
                else if (no_ce) sprintf("Confirming %s is spliced to %s", upstream_exon$name, downstream_exon$name)
-               else "Distinguishing canonical splicing from TDP-43-loss cryptic-exon inclusion",
+               else sprintf("Distinguishing canonical splicing from %s-loss cryptic-exon inclusion", factor),
     gene = gene, assembly = sprintf("%s, %s, %s strand", assembly, chrom, if (strand == "-") "minus" else "plus"),
-    citation = citation, doi = doi,
+    citation = citation, doi = doi, factor = factor,
     upstream_exon_name = upstream_exon$name, downstream_exon_name = downstream_exon$name
   )
   # raw numeric geometry (chrom/strand/exon coords), kept separate from the

@@ -18,7 +18,7 @@
 UNC13A <- list(
   title = "UNC13A cryptic-exon detection by RT-PCR",
   subtitle = "Distinguishing canonical splicing from TDP-43-loss cryptic-exon inclusion",
-  gene = "UNC13A",
+  gene = "UNC13A", factor = "TDP-43",
   assembly = "GRCh38 / hg38, chr19, minus strand",
   citation = "Ma, Prudencio, Koike et al., Nature 2022",
   doi = "10.1038/s41586-022-04424-7",
@@ -166,6 +166,7 @@ panel_primers <- function(a, col = LIGHT_COL) {
 
 panel_outcomes <- function(a, col = LIGHT_COL) {
   COL <- col
+  factor <- a$factor %||% "TDP-43"
   canon <- a$products[[1]]$size
   ce_variants <- a$products[-1]
   has_ce <- length(ce_variants) > 0
@@ -185,7 +186,7 @@ panel_outcomes <- function(a, col = LIGHT_COL) {
 
   y1 <- 60
   s <- c(s, sprintf('<text x="40" y="%s" font-size="12.5" font-weight="600" fill="%s">%s</text>',
-                    y1 - 32, COL$ink, if (has_ce) "Canonical splicing \u2014 TDP-43 present (control)" else "Confirmed splice junction"))
+                    y1 - 32, COL$ink, if (has_ce) sprintf("Canonical splicing \u2014 %s present (control)", factor) else "Confirmed splice junction"))
   s <- c(s, .exon_box(120, y1, ew, up_name, COL$exon_lt, COL$exon, COL$exon_dk))
   s <- c(s, sprintf('<line x1="270" y1="%s" x2="420" y2="%s" stroke="%s" stroke-width="2"/>', y1 + 17, y1 + 17, COL$exon))
   s <- c(s, .exon_box(420, y1, ew, dn_name, COL$exon_lt, COL$exon, COL$exon_dk))
@@ -199,7 +200,7 @@ panel_outcomes <- function(a, col = LIGHT_COL) {
 
   if (has_ce) {
     y2 <- 220
-    s <- c(s, sprintf('<text x="40" y="%s" font-size="12.5" font-weight="600" fill="%s">Cryptic-exon inclusion \u2014 TDP-43 depleted</text>', y2 - 32, COL$ink))
+    s <- c(s, sprintf('<text x="40" y="%s" font-size="12.5" font-weight="600" fill="%s">Cryptic-exon inclusion \u2014 %s depleted</text>', y2 - 32, COL$ink, factor))
     s <- c(s, .exon_box(90, y2, 130, up_name, COL$exon_lt, COL$exon, COL$exon_dk))
     s <- c(s, sprintf('<line x1="220" y1="%s" x2="300" y2="%s" stroke="%s" stroke-width="2"/>', y2 + 17, y2 + 17, COL$exon))
     s <- c(s, .exon_box(300, y2, 150, .ce_box_label(a), COL$ce_lt, COL$ce, COL$ce_dk))
@@ -222,6 +223,7 @@ panel_outcomes <- function(a, col = LIGHT_COL) {
 # --------------------------------------------------------------------------
 panel_gel <- function(a, col = LIGHT_COL) {
   COL <- col
+  factor <- a$factor %||% "TDP-43"
   canon <- a$products[[1]]$size
   # vapply, not sapply: sapply() on a zero-length list (no CE variant) returns
   # list() instead of numeric(0), which then breaks max()/min() below.
@@ -237,7 +239,7 @@ panel_gel <- function(a, col = LIGHT_COL) {
          'font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" role="img" ',
          'aria-label="Illustrative gel: expected band pattern">')
   s <- c(s, sprintf('<rect x="70" y="20" width="330" height="250" rx="6" fill="%s"/>', COL$gel_bg))
-  lanes <- list(Ladder = 120, Control = 220, "TDP-43 KD" = 320)
+  lanes <- setNames(list(120, 220, 320), c("Ladder", "Control", sprintf("%s KD", factor)))
   for (nm in names(lanes)) {
     s <- c(s, sprintf('<text x="%s" y="288" text-anchor="middle" font-size="11" fill="%s">%s</text>', lanes[[nm]], COL$ink, nm))
   }
@@ -296,7 +298,7 @@ build_html <- function(a, dark = FALSE) {
   canon_size <- a$products[[1]]$size
   ce_sizes <- sapply(a$products[-1], function(p) p$size)
   if (length(ce_sizes) > 0) {
-    gel_caption <- sprintf("control \u2192 %s bp; TDP-43 knockdown \u2192 %s bp", canon_size, ce_sizes[1])
+    gel_caption <- sprintf("control \u2192 %s bp; %s knockdown \u2192 %s bp", canon_size, a$factor %||% "TDP-43", ce_sizes[1])
     if (length(ce_sizes) > 1) gel_caption <- paste0(gel_caption, sprintf(" (\u00b1 faint %s bp)", ce_sizes[2]))
   } else {
     gel_caption <- sprintf("control \u2192 %s bp", canon_size)

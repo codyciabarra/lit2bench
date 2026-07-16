@@ -149,6 +149,7 @@ panel_design <- function() {
         layout_columns(col_widths = c(6, 6),
           l2b_card(NULL, "Gene & source", "The paper the coordinates come from.",
             textInput("gene", "Gene symbol", value = "UNC13A"),
+            textInput("factor", "Depleted/perturbed factor", value = "TDP-43"),
             textInput("doi", "DOI", value = "10.1038/s41586-022-04424-7"),
             actionButton("doi_lookup", "\U0001f50e Autofill citation from DOI", class = "btn-alt"),
             uiOutput("doi_status"), br(),
@@ -877,7 +878,8 @@ server <- function(input, output, session) {
           upstream_exon = list(name = trimws(input$up_name), start = input$up_start, end = input$up_end),
           downstream_exon = list(name = trimws(input$dn_name), start = input$dn_start, end = input$dn_end),
           ce_lengths = ce, citation = trimws(input$citation), doi = trimws(input$doi), flank = input$flank,
-          product_size_range = product_range)
+          product_size_range = product_range,
+          factor = if (nzchar(trimws(input$factor))) trimws(input$factor) else "TDP-43")
         incProgress(0.4, detail = "building figure")
         design_res(assay)
         goto_design_step(4)
@@ -900,8 +902,8 @@ server <- function(input, output, session) {
       div(class = "l2b-card",
         l2b_hero(
           l2b_stat("Canonical product", sprintf("%d bp", p[[1]]$size),
-                   if (length(p) > 1) "TDP-43 present" else "confirmed junction"),
-          if (length(p) > 1) l2b_stat("CE included", sprintf("%d bp", p[[2]]$size), "TDP-43 depleted", "accent"),
+                   if (length(p) > 1) p[[1]]$cond else "confirmed junction"),
+          if (length(p) > 1) l2b_stat("CE included", sprintf("%d bp", p[[2]]$size), p[[2]]$cond, "accent"),
           if (length(p) > 1) l2b_stat("Size shift", sprintf("+%d bp", p[[2]]$size - p[[1]]$size), "detectable on one gel")
         ),
         tags$iframe(srcdoc = design_html(),

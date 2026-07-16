@@ -91,7 +91,7 @@ fetch_cryptic_literature <- function(result, retmax = 3) {
   gene <- result$label
   # a raw "chrN:start-end" label makes no useful query -- skip literature entirely
   if (grepl(":", gene) || !grepl("^[A-Za-z0-9_-]{2,}$", gene)) return(NULL)
-  query <- sprintf("%s (cryptic exon OR splicing OR TDP-43)", gene)
+  query <- sprintf("%s (cryptic exon OR splicing OR alternative splicing)", gene)
   tryCatch({
     ids <- pubmed_search(query, retmax = retmax)
     if (length(ids) == 0) return(NULL)
