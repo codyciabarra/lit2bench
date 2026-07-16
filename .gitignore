@@ -1,0 +1,7 @@
+.Rhistory
+.Rapp.history
+.RData
+.Rproj.user/
+*.bam
+*.bai
+.claude/

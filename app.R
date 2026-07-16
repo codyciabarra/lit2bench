@@ -1,0 +1,1621 @@
+# app.R -- Lit2Bench: bench toolkit for splicing / molecular biology.
+#
+# All calculations are deterministic R (no AI): primer3_core for primer design,
+# UCSC's REST API for reference sequence, plain arithmetic everywhere else.
+#
+# Requires: shiny, bslib, DT   (install.packages(c("shiny","bslib","DT")))
+
+library(shiny)
+library(bslib)
+library(DT)
+
+# Cryptic Exon Detector accepts BAM uploads straight from the browser, and RNA-seq
+# BAMs are routinely multi-GB (real datasets, e.g. ENCODE, commonly run 5-8 GB per
+# file) -- raise Shiny's default 5 MB cap well above that.
+options(shiny.maxRequestSize = 10000 * 1024^2)
+
+source("R/ui_helpers.R")
+source("R/primer_design.R")
+source("R/design_splicing_primers.R")
+source("R/primer_schematic.R")
+source("R/primer_preview.R")
+source("R/primer_validation.R")
+source("R/normalization.R")
+source("R/standard_curve.R")
+source("R/qpcr.R")
+source("R/densitometry.R")
+source("R/citation.R")
+source("R/pcr_setup.R")
+source("R/a280.R")
+source("R/protein_params.R")
+source("R/dilution.R")
+source("R/plasmid_creator.R")
+source("R/plasmid_map.R")
+source("R/cryptic_exon_bam.R")
+source("R/differential_splicing.R")
+source("R/sashimi_plot.R")
+source("R/export_pdf.R")
+source("R/local_llm.R")
+source("R/pubmed.R")
+source("R/cryptic_interpret.R")
+source("R/exon_extractor.R")
+source("R/transcript_explorer.R")
+
+`%||%` <- function(x, default) if (is.null(x) || (length(x) == 1 && is.na(x)) || (is.character(x) && !nzchar(x))) default else x
+
+theme_l2b <- bs_theme(
+  version = 5, bg = "#0a0d18", fg = "#e9ecf5",
+  primary = "#7c6cf0", secondary = "#f2a341", success = "#2fbf71", danger = "#f2555b",
+  base_font = font_google("Inter"), heading_font = font_google("Inter"),
+  "font-size-base" = "1rem", "border-radius" = "0.75rem"
+)
+
+# tool registry -- id, label, icon, group
+TOOLS <- list(
+  list(id = "explorer", label = "Transcript Explorer", icon = "\U0001f9ed", group = "Design"),
+  list(id = "extractor", label = "Exon Extractor",     icon = "\U00002702", group = "Design"),
+  list(id = "design",   label = "Primer & Schematic", icon = "\U0001f9ec", group = "Design"),
+  list(id = "cryptic",  label = "Cryptic Exon Engine", icon = "\U0001f52c", group = "Design"),
+  list(id = "plasmid",  label = "Plasmid Creator",    icon = "\U0001f504", group = "Design"),
+  list(id = "pcr",      label = "PCR Setup",          icon = "\U0001f9ea", group = "Design"),
+  list(id = "qpcr",     label = "qPCR (ddCt)",        icon = "\U0001f4c9", group = "Analysis"),
+  list(id = "dens",     label = "Densitometry",       icon = "\U0001f4ca", group = "Analysis"),
+  list(id = "sc",       label = "Standard Curve",     icon = "\U0001f4c8", group = "Analysis"),
+  list(id = "norm",     label = "Protein Normalization", icon = "⚖️", group = "Calculators"),
+  list(id = "a280",     label = "A280 Calculator",    icon = "\U0001f9eb", group = "Calculators"),
+  list(id = "pp",       label = "Protein Parameters", icon = "\U0001f9ec", group = "Calculators"),
+  list(id = "dil",      label = "Dilution Calculator", icon = "\U0001f4a7", group = "Calculators")
+)
+TOOL_BY_ID <- setNames(TOOLS, sapply(TOOLS, `[[`, "id"))
+
+# right-rail content: a one-line honest description (no invented metrics) and
+# 2 related tools to jump to -- both genuinely derived from how the tools chain
+# together in a typical workflow.
+TOOL_ABOUT <- list(
+  explorer = "Search a gene symbol, RefSeq/Ensembl transcript ID, or a locus and see every annotated isoform in the region -- strand, length, coding status, exon/intron counts, CDS and UTR spans.",
+  extractor = "Pulls real exon and intron sequence for a chosen transcript, exports BED/FASTA/CSV/JSON/GTF, and hands a chosen exon straight to the Primer Designer -- no manual coordinate copying.",
+  design  = "Designs a junction-spanning primer pair against live reference sequence and shows the expected canonical vs. cryptic-exon product sizes.",
+  cryptic = "Reads control vs. knockdown BAMs over a locus and flags splice junctions/exons absent from the reference annotation -- an IGV-style sashimi plot without leaving the app.",
+  plasmid = "Joins your parts end-to-end, circularizes them, and draws the resulting map.",
+  pcr     = "Scales stock/final concentrations into a master mix for N reactions plus excess.",
+  qpcr    = "Calculates ΔΔCt relative expression against a chosen calibrator sample.",
+  dens    = "Normalizes target band intensity to a loading control across lanes.",
+  sc      = "Fits a standard curve (linear or quadratic) and back-calculates unknown concentrations.",
+  norm    = "Works out lysate / water / dye volumes for equal-protein-mass loading.",
+  a280    = "Converts A280 absorbance to concentration via Beer-Lambert, using your extinction coefficient and MW.",
+  pp      = "Computes MW, pI, and extinction coefficient directly from an amino-acid sequence.",
+  dil     = "Solves C1V1 = C2V2 for stock volume and diluent volume."
+)
+TOOL_RELATED <- list(
+  explorer = c("extractor", "design"), extractor = c("design", "explorer"),
+  design = c("extractor", "cryptic", "plasmid"), cryptic = c("design", "pcr"),
+  plasmid = c("design", "pcr"), pcr = c("design", "qpcr"),
+  qpcr = c("dens", "sc"), dens = c("norm", "sc"), sc = c("norm", "a280"),
+  norm = c("a280", "dil"), a280 = c("pp", "dil"), pp = c("a280", "dil"), dil = c("pcr", "norm")
+)
+
+l2b_generic_aside <- function(id, status_ui) {
+  tagList(
+    l2b_aside_card("About this tool",
+      p(style = "font-size:13.5px; color:var(--l2b-text-muted); line-height:1.5; margin:0;", TOOL_ABOUT[[id]])),
+    l2b_aside_card("Status", status_ui),
+    l2b_aside_card("Quick actions",
+      lapply(TOOL_RELATED[[id]], function(rid) {
+        t <- TOOL_BY_ID[[rid]]
+        l2b_aside_link(paste0("aside_nav_", rid), t$icon, t$label)
+      }))
+  )
+}
+
+# ------------------------------------------------------ PANEL: TRANSCRIPT EXPLORER
+panel_explorer <- function() {
+  layout_columns(col_widths = c(4, 8),
+    div(
+      l2b_card(1, "Search", "Gene symbol, RefSeq/Ensembl transcript ID, or a literal locus (chr:start-end).",
+        textInput("explorer_query", "Query", value = "UNC13A"),
+        selectInput("explorer_assembly", "Assembly", choices = c("hg38", "hg19"), selected = "hg38"),
+        actionButton("explorer_go", "Search", class = "btn-run"))
+    ),
+    div(uiOutput("explorer_out"))
+  )
+}
+
+# ----------------------------------------------------------- PANEL: EXON EXTRACTOR
+panel_extractor <- function() {
+  layout_columns(col_widths = c(4, 8),
+    div(
+      l2b_card(1, "Transcript", "Selected from the Transcript Explorer.", uiOutput("extractor_tx_info")),
+      l2b_card(2, "Sequence", "One request for the whole transcript span, sliced locally into exons/introns.",
+        actionButton("extractor_fetch", "Fetch sequences", class = "btn-run")),
+      l2b_card(3, "Design for a candidate exon", "A cryptic/novel exon (e.g. from the Cryptic Exon Engine) isn't in this list — enter its genomic coordinates directly and the flanking real exons in this transcript are found automatically, same as clicking a row above.",
+        fluidRow(column(6, numericInput("extractor_custom_start", "Start", value = NA)),
+                 column(6, numericInput("extractor_custom_end", "End", value = NA))),
+        actionButton("extractor_design_custom_go", "Design primers for this region →", class = "btn-alt", style = "width:auto;"))
+    ),
+    div(uiOutput("extractor_out"))
+  )
+}
+
+  # ----------------------------------------------------------- PANEL: DESIGN
+.design_preview_placeholder <- function(msg) {
+  div(class = "l2b-card", l2b_empty("\U0001f9ec", "Design preview", msg))
+}
+
+panel_design <- function() {
+  div(
+    uiOutput("design_stepper"),
+    tabsetPanel(id = "design_wizard", type = "hidden",
+      tabPanel("1",
+        layout_columns(col_widths = c(6, 6),
+          l2b_card(NULL, "Gene & source", "The paper the coordinates come from.",
+            textInput("gene", "Gene symbol", value = "UNC13A"),
+            textInput("doi", "DOI", value = "10.1038/s41586-022-04424-7"),
+            actionButton("doi_lookup", "\U0001f50e Autofill citation from DOI", class = "btn-alt"),
+            uiOutput("doi_status"), br(),
+            textInput("citation", "Citation", value = "Ma, Prudencio, Koike et al., Nature 2022"),
+            br(),
+            div(style = "display:flex; justify-content:flex-end;",
+                actionButton("design_next1", "Next: Genomic location →", class = "btn-run", style = "width:auto;"))),
+          .design_preview_placeholder("Complete all three steps, then click Generate to see the schematic here.")
+        )),
+      tabPanel("2",
+        layout_columns(col_widths = c(6, 6),
+          l2b_card(NULL, "Genomic location", "Reference genome and the two flanking exons.",
+            fluidRow(column(6, textInput("assembly", "Assembly", value = "hg38")),
+                     column(6, textInput("chrom", "Chromosome", value = "chr19"))),
+            radioButtons("strand", "Strand", choices = c("+" = "+", "- (minus)" = "-"), selected = "-", inline = TRUE),
+            hr(),
+            strong("Upstream exon"),
+            textInput("up_name", "Name", value = "Exon 20"),
+            fluidRow(column(6, numericInput("up_start", "Start", value = 17642845)),
+                     column(6, numericInput("up_end", "End", value = 17642960))),
+            br(), strong("Downstream exon"),
+            textInput("dn_name", "Name", value = "Exon 21"),
+            fluidRow(column(6, numericInput("dn_start", "Start", value = 17641393)),
+                     column(6, numericInput("dn_end", "End", value = 17641556))),
+            uiOutput("design_step2_err_ui"), br(),
+            div(style = "display:flex; justify-content:space-between;",
+                actionButton("design_back2", "← Back", class = "btn-ghost", style = "width:auto;"),
+                actionButton("design_next2", "Next: Design inputs →", class = "btn-run", style = "width:auto;"))),
+          .design_preview_placeholder("Complete all three steps, then click Generate to see the schematic here.")
+        )),
+      tabPanel("3",
+        layout_columns(col_widths = c(6, 6),
+          l2b_card(NULL, "Cryptic exon / junction target", "Length(s) in bp, from the paper -- leave blank to just confirm the single available junction (e.g. a first/last exon with no flank on one side).",
+            textInput("ce_lengths", "Comma-separated (e.g. 128, 178) -- optional", value = "128, 178"),
+            numericInput("flank", "Flank for primer design (bp)", value = 140, min = 60, max = 300),
+            radioButtons("primer_mode", "Primer type",
+                        choices = c("PCR (gel, size shift)" = "pcr", "qPCR (short amplicon, junction-specific)" = "qpcr"),
+                        selected = "pcr", inline = TRUE),
+            uiOutput("design_step3_err_ui"), br(),
+            div(style = "display:flex; justify-content:space-between;",
+                actionButton("design_back3", "← Back", class = "btn-ghost", style = "width:auto;"),
+                actionButton("generate", "Generate design + figure", class = "btn-run", style = "width:auto;"))),
+          .design_preview_placeholder("Click Generate to fetch reference sequence, design primers, and build the figure.")
+        )),
+      tabPanel("4",
+        div(
+          div(style = "display:flex; justify-content:space-between; align-items:center;",
+              actionButton("design_back4", "← Back to edit", class = "btn-ghost", style = "width:auto;"),
+              uiOutput("download_ui")),
+          br(),
+          uiOutput("design_out")
+        ))
+    )
+  )
+}
+
+# ---------------------------------------------- PANEL: CRYPTIC EXON ENGINE
+panel_cryptic <- function() {
+  layout_columns(col_widths = c(4, 8),
+    div(
+      l2b_card(1, "Locus", "A literal locus is reliable; a gene symbol is a best-effort UCSC lookup.",
+        textInput("cryptic_locus", "Locus or gene symbol", value = "UNC13A"),
+        selectInput("cryptic_assembly", "Assembly", choices = c("hg38", "hg19"), selected = "hg38")),
+      l2b_card(2, "BAM source", "Lit2Bench runs on the same machine as your data, so pointing at BAMs already on disk skips the browser upload and the copy entirely -- near-instant even for multi-GB files. Upload is still there for files that aren't local.",
+        radioButtons("cryptic_bam_source", NULL,
+                      choices = c("Local file path (fastest)" = "path", "Upload through browser" = "upload"),
+                      selected = "path")),
+      conditionalPanel("input.cryptic_bam_source == 'path'",
+        l2b_card(3, "Control BAM path(s)", "One path per line, or comma-separated. Globs (/data/ctrl_*.bam) and ~ work. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
+          textAreaInput("cryptic_control_paths", NULL, rows = 2, resize = "vertical",
+                        placeholder = "/path/to/SCR_DMSO.bam")),
+        l2b_card(4, "Knockdown BAM path(s)", "Same as above, for the TDP-43 (or other) knockdown/knockout sample.",
+          textAreaInput("cryptic_kd_paths", NULL, rows = 2, resize = "vertical",
+                        placeholder = "/path/to/TDP43KD_11j.bam"))),
+      conditionalPanel("input.cryptic_bam_source == 'upload'",
+        l2b_card(3, "Control BAM", "Select one or more replicate .bam files (and their .bai's, if you have them) together. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
+          fileInput("cryptic_control_files", NULL, multiple = TRUE, accept = c(".bam", ".bai"))),
+        l2b_card(4, "Knockdown BAM", "Same as above, for the TDP-43 (or other) knockdown/knockout sample -- one or more replicates.",
+          fileInput("cryptic_kd_files", NULL, multiple = TRUE, accept = c(".bam", ".bai")))),
+      l2b_card(5, "Detection thresholds", "A knockdown junction counts as novel below max control reads and absent from RefSeq. Re-running after changing only these is near-instant -- the BAM reads and annotation are cached per session, and only the thresholds are recomputed.",
+        fluidRow(column(6, numericInput("cryptic_min_kd_reads", "Min KD reads", value = 3, min = 1)),
+                 column(6, numericInput("cryptic_max_ctrl_reads", "Max control reads", value = 1, min = 0))),
+        fluidRow(column(6, numericInput("cryptic_exon_min", "Min candidate exon (bp)", value = 20, min = 1)),
+                 column(6, numericInput("cryptic_exon_max", "Max candidate exon (bp)", value = 400, min = 1))),
+        br(),
+        actionButton("cryptic_go", "Run detection", class = "btn-run"))
+    ),
+    div(uiOutput("cryptic_out"))
+  )
+}
+
+# ------------------------------------------------------------- PANEL: qPCR
+panel_qpcr <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Enter Ct values", "Click any cell to edit.",
+        l2b_grid_ui("qpcr_g", "+ Add sample")),
+      l2b_card(2, "Calibrator", "Everything is relative to this sample (fold = 1.00).",
+        uiOutput("qpcr_calib"), br(),
+        actionButton("qpcr_go", "Calculate relative expression", class = "btn-run"))
+    ),
+    div(uiOutput("qpcr_out"))
+  )
+}
+
+# ----------------------------------------------------- PANEL: DENSITOMETRY
+panel_dens <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Band intensities", "Target and loading-control intensity per lane.",
+        l2b_grid_ui("dens_g", "+ Add lane")),
+      l2b_card(2, "Reference lane", "Set to 1.00; other lanes are relative to it.",
+        uiOutput("dens_ref"), br(),
+        actionButton("dens_go", "Calculate", class = "btn-run"))
+    ),
+    div(uiOutput("dens_out"))
+  )
+}
+
+# --------------------------------------------------- PANEL: STANDARD CURVE
+panel_sc <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Standards", "Known concentrations and their absorbances.",
+        l2b_grid_ui("sc_std_g", "+ Add standard")),
+      l2b_card(2, "Unknown samples", "Absorbance readings to convert.",
+        l2b_grid_ui("sc_samp_g", "+ Add sample"),
+        br(),
+        selectInput("sc_degree", "Fit type",
+                    choices = c("Linear (BCA)" = 1, "Quadratic (Bradford)" = 2), selected = 1),
+        actionButton("sc_go", "Fit curve & quantify", class = "btn-run"))
+    ),
+    div(uiOutput("sc_out"))
+  )
+}
+
+# ---------------------------------------------------- PANEL: NORMALIZATION
+panel_norm <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Sample concentrations", "From your BCA/Bradford assay.",
+        l2b_grid_ui("norm_g", "+ Add sample")),
+      l2b_card(2, "Loading target", "Equal protein mass per lane.",
+        fluidRow(column(6, numericInput("norm_target", "Target protein (ug)", value = 20)),
+                 column(6, numericInput("norm_vol", "Final volume (uL)", value = 20))),
+        numericInput("norm_dye", "Loading dye (fold; blank = none)", value = 4),
+        br(),
+        actionButton("norm_go", "Calculate loading volumes", class = "btn-run"))
+    ),
+    div(uiOutput("norm_out"))
+  )
+}
+
+# ------------------------------------------------------------- PANEL: A280
+panel_a280 <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "A280 readings", "Blank-subtracted absorbance at 280 nm.",
+        l2b_grid_ui("a280_g", "+ Add sample")),
+      l2b_card(2, "Protein constants", "Look these up (ExPASy ProtParam) — this tool won't guess them.",
+        fluidRow(column(6, numericInput("a280_epsilon", "ε (M⁻¹cm⁻¹)", value = 43824)),
+                 column(6, numericInput("a280_mw", "MW (Da)", value = 66463))),
+        fluidRow(column(6, numericInput("a280_path", "Path length (cm)", value = 1.0, step = 0.1)),
+                 column(6, numericInput("a280_dilution", "Dilution factor", value = 1, min = 1))),
+        br(),
+        actionButton("a280_go", "Calculate concentration", class = "btn-run"))
+    ),
+    div(uiOutput("a280_out"))
+  )
+}
+
+# ------------------------------------------------- PANEL: PROTEIN PARAMS
+panel_pp <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Amino acid sequence", "One-letter code. MW, ε, and pI are computed from this.",
+        textAreaInput("pp_sequence", NULL, value = "FVNQHLCGSHLVEALYLVCGERGFFYTPKT", rows = 6),
+        actionButton("pp_go", "Compute parameters", class = "btn-run"))
+    ),
+    div(uiOutput("pp_out"))
+  )
+}
+
+# --------------------------------------------------------- PANEL: DILUTION
+panel_dil <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Dilutions", "C1V1 = C2V2. Use consistent units within each row.",
+        l2b_grid_ui("dil_g", "+ Add dilution"),
+        br(),
+        actionButton("dil_go", "Calculate volumes", class = "btn-run"))
+    ),
+    div(uiOutput("dil_out"))
+  )
+}
+
+# -------------------------------------------------------- PANEL: PCR SETUP
+panel_pcr <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Pooled components", "Go into the master mix. Stock and final concentration, same units.",
+        l2b_grid_ui("pcr_pool_g", "+ Add component")),
+      l2b_card(2, "Per-tube components", "Added individually (e.g. template) — not pooled.",
+        l2b_grid_ui("pcr_fix_g", "+ Add component")),
+      l2b_card(3, "Reaction setup", NULL,
+        fluidRow(column(6, numericInput("pcr_final_vol", "Reaction volume (uL)", value = 25)),
+                 column(6, numericInput("pcr_num_rxn", "Number of reactions", value = 8, min = 1))),
+        numericInput("pcr_excess", "Master-mix excess (1.1 = 10% extra)", value = 1.1, min = 1, step = 0.05),
+        br(),
+        actionButton("pcr_go", "Calculate master mix", class = "btn-run"))
+    ),
+    div(uiOutput("pcr_out"))
+  )
+}
+
+# -------------------------------------------------- PANEL: PLASMID CREATOR
+panel_plasmid <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Plasmid parts", "Joined in this order, then circularized.",
+        textInput("pc_title", "Plasmid name", value = "pTest-GFP"),
+        br(),
+        l2b_grid_ui("plasmid_g", "+ Add part"),
+        div(style = "font-size:12px; color:var(--l2b-text-faint); margin-top:8px;",
+            "Types: backbone, ori, marker, promoter, CDS, insert, MCS"),
+        br(),
+        actionButton("pc_go", "Build plasmid map", class = "btn-run"),
+        br(), br(), uiOutput("pc_download_ui"))
+    ),
+    div(uiOutput("plasmid_out"))
+  )
+}
+
+
+
+ui <- page_fluid(
+  theme = theme_l2b,
+  tags$head(tags$style(HTML(L2B_CSS)), tags$script(HTML(L2B_JS)), HTML(SASHIMI_JS)),
+
+  l2b_topbar(),
+
+  div(class = "l2b-shell",
+    div(class = "l2b-col-nav", uiOutput("nav_sidebar")),
+    div(class = "l2b-col-main",
+      tabsetPanel(id = "tool_tabs", type = "hidden",
+        tabPanel("explorer", panel_explorer()),
+        tabPanel("extractor", panel_extractor()),
+        tabPanel("design", panel_design()),
+        tabPanel("cryptic", panel_cryptic()),
+        tabPanel("plasmid", panel_plasmid()),
+        tabPanel("pcr", panel_pcr()),
+        tabPanel("qpcr", panel_qpcr()),
+        tabPanel("dens", panel_dens()),
+        tabPanel("sc", panel_sc()),
+        tabPanel("norm", panel_norm()),
+        tabPanel("a280", panel_a280()),
+        tabPanel("pp", panel_pp()),
+        tabPanel("dil", panel_dil())
+      )),
+    div(class = "l2b-col-aside", uiOutput("aside_out"))
+  )
+)
+
+server <- function(input, output, session) {
+
+  # theme_mode is pushed from the client-side toggle (see L2B_JS); everything
+  # except two pre-rendered SVG/HTML documents repaints via CSS alone, but
+  # those two need to know which palette to draw with.
+  dark_mode <- reactive({ if (is.null(input$theme_mode)) TRUE else identical(input$theme_mode, "dark") })
+
+  # shared handoff state for the Explorer -> Extractor -> Design pipeline
+  # (list(tx = <exon data.frame>, name = <transcript accession>, gene_symbol = ...))
+  shared_selected_tx <- reactiveVal(NULL)
+
+  # tell the client which tool is active so CSS can switch layout (full-width,
+  # no right rail, for wide-figure tools like the Cryptic Exon Engine)
+  observe({
+    session$sendCustomMessage("l2bTool", if (is.null(input$tool_tabs)) "design" else input$tool_tabs)
+  })
+
+  # ======================================================================
+  # GRIDS (declared once, up-front -- DT needs stable output IDs)
+  # ======================================================================
+  qpcr_grid <- l2b_grid_server("qpcr_g", input, output, session,
+    data.frame(Sample = c("control", "treated"), `Ct target` = c(24.1, 21.0),
+               `Ct reference` = c(18.0, 18.05), check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("sample_%d", n), NA_real_, NA_real_))
+
+  dens_grid <- l2b_grid_server("dens_g", input, output, session,
+    data.frame(Lane = c("ctrl", "KD"), `Target intensity` = c(1000, 1800),
+               `Control intensity` = c(2000, 2100), check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("lane_%d", n), NA_real_, NA_real_))
+
+  sc_std_grid <- l2b_grid_server("sc_std_g", input, output, session,
+    data.frame(Concentration = c(0, 125, 250, 500, 1000), Absorbance = c(0, 0.14, 0.28, 0.55, 1.09),
+               check.names = FALSE),
+    function(n) list(NA_real_, NA_real_))
+
+  sc_samp_grid <- l2b_grid_server("sc_samp_g", input, output, session,
+    data.frame(Sample = c("lysateA", "lysateB"), Absorbance = c(0.42, 0.83),
+               check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("sample_%d", n), NA_real_))
+
+  norm_grid <- l2b_grid_server("norm_g", input, output, session,
+    data.frame(Sample = c("S1", "S2", "S3"), `Concentration (ug/uL)` = c(3.2, 2.1, 0.9),
+               check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("S%d", n), NA_real_))
+
+  a280_grid <- l2b_grid_server("a280_g", input, output, session,
+    data.frame(Sample = c("sample_A", "sample_B"), A280 = c(0.667, 1.334),
+               check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("sample_%d", n), NA_real_))
+
+  dil_grid <- l2b_grid_server("dil_g", input, output, session,
+    data.frame(Name = c("TBE_1X", "NaCl_150mM"), `Stock conc` = c(10, 5000),
+               `Final conc` = c(1, 150), `Final volume` = c(500, 100),
+               check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("buffer_%d", n), NA_real_, NA_real_, NA_real_))
+
+  pcr_pool_grid <- l2b_grid_server("pcr_pool_g", input, output, session,
+    data.frame(Component = c("2X Master Mix", "FWD primer", "REV primer"),
+               `Stock conc` = c(2, 10, 10), `Final conc` = c(1, 0.5, 0.5),
+               check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("component_%d", n), NA_real_, NA_real_))
+
+  pcr_fix_grid <- l2b_grid_server("pcr_fix_g", input, output, session,
+    data.frame(Component = "Template", `Volume (uL)` = 1, check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("component_%d", n), NA_real_))
+
+  plasmid_grid <- l2b_grid_server("plasmid_g", input, output, session,
+    data.frame(Name = c("Backbone", "AmpR", "ori", "Promoter", "GFP"),
+               Type = c("backbone", "marker", "ori", "promoter", "insert"),
+               Sequence = c("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+                            "GGCCGGCCGGCCTTAATTAATTAAGGCCGGCCGGCCTTAA",
+                            "TTGGCCAATTGGCCAATTGGCCAATTGGCCAATTGGCCAA",
+                            "CATGCATGCATGCATG",
+                            "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGC"),
+               check.names = FALSE, stringsAsFactors = FALSE),
+    function(n) list(sprintf("part_%d", n), "insert", ""))
+
+  # ======================================================================
+  # NAV (drives a hidden tabsetPanel -- panels are built once and never
+  # destroyed, which is what fixes DT's "Invalid JSON response" error from
+  # before: that happened because panels were being torn down and rebuilt
+  # on every tab switch, which corrupts DataTables' internal JS state.)
+  # ======================================================================
+  output$nav_sidebar <- renderUI({
+    active <- if (is.null(input$tool_tabs)) "design" else input$tool_tabs
+    groups <- unique(sapply(TOOLS, `[[`, "group"))
+    div(class = "l2b-nav",
+        lapply(groups, function(g) {
+          tagList(
+            div(class = "l2b-nav-group", g),
+            lapply(Filter(function(t) t$group == g, TOOLS), function(t) {
+              actionButton(paste0("nav_", t$id), HTML(paste0(t$icon, "&nbsp;&nbsp;", t$label)),
+                           class = paste("btn", if (identical(active, t$id)) "active" else ""))
+            })
+          )
+        })
+    )
+  })
+  for (t in TOOLS) {
+    local({
+      tid <- t$id
+      observeEvent(input[[paste0("nav_", tid)]], updateTabsetPanel(session, "tool_tabs", selected = tid))
+      observeEvent(input[[paste0("aside_nav_", tid)]], updateTabsetPanel(session, "tool_tabs", selected = tid))
+    })
+  }
+
+  # ======================================================================
+  # LOGIC
+  # ======================================================================
+
+  # ---- TRANSCRIPT EXPLORER ----
+  explorer_res <- reactiveVal(NULL); explorer_err <- reactiveVal(NULL)
+  observeEvent(input$explorer_go, {
+    explorer_err(NULL); explorer_res(NULL)
+    out <- tryCatch(explorer_search(input$explorer_query, assembly = input$explorer_assembly), error = function(e) e)
+    if (inherits(out, "error")) explorer_err(conditionMessage(out)) else explorer_res(out)
+  })
+  output$explorer_tbl <- renderDT({
+    req(explorer_res())
+    df <- transcript_summary_table(explorer_res()$transcripts)
+    out <- data.frame(Transcript = df$name, Gene = df$gene_symbol, Chrom = df$chrom, Strand = df$strand,
+                      `Length (bp)` = format(df$length_bp, big.mark = ","), Coding = df$coding_status,
+                      Exons = df$n_exons, Introns = df$n_introns,
+                      `CDS (bp)` = df$cds_len, `5' UTR (bp)` = df$utr5_len, `3' UTR (bp)` = df$utr3_len,
+                      check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "single",
+              options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE))
+  }, server = TRUE)
+  output$explorer_out <- renderUI({
+    if (!is.null(explorer_err())) return(div(class = "l2b-card", l2b_err(explorer_err())))
+    if (is.null(explorer_res())) return(div(class = "l2b-card",
+      l2b_empty("\U0001f9ed", "No search yet", "Enter a gene symbol, transcript ID, or locus and click Search.")))
+    r <- explorer_res()
+    div(class = "l2b-card",
+      l2b_hero(
+        l2b_stat("Locus", sprintf("%s:%s-%s", r$locus$chrom, format(r$locus$start, big.mark = ","), format(r$locus$end, big.mark = ",")), r$locus$label),
+        l2b_stat("Transcripts found", length(r$transcripts), "in this region")
+      ),
+      div(class = "l2b-card-title", "Transcripts in this region"),
+      p(class = "l2b-card-sub", "Select a row, then extract its exons. Scroll the table right for CDS/UTR columns."),
+      DTOutput("explorer_tbl"),
+      br(),
+      actionButton("explorer_view_exons", "View exons for selected transcript →", class = "btn-run", style = "width:auto;")
+    )
+  })
+  observeEvent(input$explorer_view_exons, {
+    req(explorer_res())
+    sel <- input$explorer_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) { explorer_err("Select a transcript row first."); return(invisible()) }
+    explorer_err(NULL)
+    df <- transcript_summary_table(explorer_res()$transcripts)
+    tx_name <- df$name[sel]
+    tx <- explorer_res()$transcripts[[tx_name]]
+    shared_selected_tx(list(tx = tx, name = tx_name, gene_symbol = tx$gene_symbol[1]))
+    extractor_seqs(NULL); extractor_err(NULL)
+    updateTabsetPanel(session, "tool_tabs", selected = "extractor")
+  })
+
+  # ---- EXON EXTRACTOR ----
+  extractor_seqs <- reactiveVal(NULL); extractor_err <- reactiveVal(NULL)
+  output$extractor_tx_info <- renderUI({
+    sel <- shared_selected_tx()
+    if (is.null(sel)) return(div(class = "l2b-aside-note", "No transcript selected yet — pick one in Transcript Explorer."))
+    tx <- sel$tx
+    tagList(
+      p(strong(sel$name), " (", sel$gene_symbol %||% "no gene symbol", ")"),
+      p(class = "l2b-card-sub", sprintf("%s:%s-%s · %s strand · %d exons",
+        tx$chrom[1], format(min(tx$start), big.mark = ","), format(max(tx$end), big.mark = ","),
+        if (identical(tx$strand[1], "-")) "minus" else "plus", nrow(tx)))
+    )
+  })
+  observeEvent(input$extractor_fetch, {
+    req(shared_selected_tx())
+    extractor_err(NULL); extractor_seqs(NULL)
+    withProgress(message = "Fetching sequence from UCSC...", value = 0.5, {
+      out <- tryCatch(fetch_transcript_sequences(shared_selected_tx()$tx, assembly = input$explorer_assembly),
+                      error = function(e) e)
+      if (inherits(out, "error")) extractor_err(conditionMessage(out)) else extractor_seqs(out)
+    })
+  })
+  output$extractor_exon_tbl <- renderDT({
+    req(extractor_seqs())
+    df <- extractor_seqs()$exons
+    out <- data.frame(Exon = df$exon_number, Start = format(df$start, big.mark = ","), End = format(df$end, big.mark = ","),
+                      `Length (bp)` = df$length, Region = df$region, check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  }, server = TRUE)
+  output$extractor_intron_tbl <- renderDT({
+    req(extractor_seqs())
+    df <- extractor_seqs()$introns
+    if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "Single-exon transcript — no introns.")))
+    out <- data.frame(Intron = df$intron_number, Start = format(df$start, big.mark = ","),
+                      End = format(df$end, big.mark = ","), `Length (bp)` = df$length, check.names = FALSE)
+    l2b_result_table(out)
+  }, server = FALSE)
+  output$extractor_out <- renderUI({
+    if (is.null(shared_selected_tx())) return(div(class = "l2b-card",
+      l2b_empty("\U00002702", "No transcript yet", "Select a transcript in Transcript Explorer, then click \"View exons\".")))
+    if (!is.null(extractor_err())) return(div(class = "l2b-card", l2b_err(extractor_err())))
+    if (is.null(extractor_seqs())) return(div(class = "l2b-card",
+      l2b_empty("\U00002702", "Not fetched yet", "Click \"Fetch sequences\".")))
+    tagList(
+      div(class = "l2b-card",
+        div(class = "l2b-card-title", "Exons"),
+        DTOutput("extractor_exon_tbl"),
+        div(style = "display:flex; gap:8px; flex-wrap:wrap; margin:14px 0 4px;",
+            downloadButton("extractor_dl_bed", "BED", class = "btn-dl"),
+            downloadButton("extractor_dl_fasta", "FASTA", class = "btn-dl"),
+            downloadButton("extractor_dl_csv", "CSV", class = "btn-dl"),
+            downloadButton("extractor_dl_json", "JSON", class = "btn-dl"),
+            downloadButton("extractor_dl_gtf", "GTF", class = "btn-dl")),
+        p(class = "l2b-card-sub", "Select an exon row above, then jump straight to the Primer Designer — no manual coordinate entry."),
+        actionButton("extractor_design_go", "Design primers for selected exon →", class = "btn-run", style = "width:auto;")
+      ),
+      div(class = "l2b-card",
+        div(class = "l2b-card-title", "Introns"),
+        DTOutput("extractor_intron_tbl"),
+        div(style = "display:flex; gap:8px; margin-top:10px;",
+            downloadButton("extractor_dl_intron_bed", "BED", class = "btn-dl"),
+            downloadButton("extractor_dl_intron_fasta", "FASTA", class = "btn-dl"))
+      )
+    )
+  })
+  output$extractor_dl_bed <- downloadHandler(
+    filename = function() sprintf("%s_exons.bed", shared_selected_tx()$name),
+    content = function(f) writeLines(export_bed(extractor_seqs()$exons, extractor_seqs()$chrom, extractor_seqs()$strand, shared_selected_tx()$name, "exon"), f))
+  output$extractor_dl_fasta <- downloadHandler(
+    filename = function() sprintf("%s_exons.fasta", shared_selected_tx()$name),
+    content = function(f) writeLines(export_fasta(extractor_seqs()$exons, extractor_seqs()$chrom, shared_selected_tx()$name, "exon"), f))
+  output$extractor_dl_csv <- downloadHandler(
+    filename = function() sprintf("%s_exons.csv", shared_selected_tx()$name),
+    content = function(f) writeLines(export_csv_text(extractor_seqs()$exons), f))
+  output$extractor_dl_json <- downloadHandler(
+    filename = function() sprintf("%s_exons.json", shared_selected_tx()$name),
+    content = function(f) writeLines(export_json(extractor_seqs()$exons), f))
+  output$extractor_dl_gtf <- downloadHandler(
+    filename = function() sprintf("%s.gtf", shared_selected_tx()$name),
+    content = function(f) {
+      tx <- shared_selected_tx()$tx
+      writeLines(export_gtf(extractor_seqs()$exons, extractor_seqs()$chrom, extractor_seqs()$strand,
+                            shared_selected_tx()$name, shared_selected_tx()$gene_symbol, tx$cds_start[1], tx$cds_end[1]), f)
+    })
+  output$extractor_dl_intron_bed <- downloadHandler(
+    filename = function() sprintf("%s_introns.bed", shared_selected_tx()$name),
+    content = function(f) writeLines(export_bed(extractor_seqs()$introns, extractor_seqs()$chrom, extractor_seqs()$strand, shared_selected_tx()$name, "intron"), f))
+  output$extractor_dl_intron_fasta <- downloadHandler(
+    filename = function() sprintf("%s_introns.fasta", shared_selected_tx()$name),
+    content = function(f) writeLines(export_fasta(extractor_seqs()$introns, extractor_seqs()$chrom, shared_selected_tx()$name, "intron"), f))
+
+  # -- hand-off to the Primer Designer: treat the selected exon/junction as the
+  # target whose inclusion/exclusion the primer pair should detect, and its
+  # immediate neighbors (via the existing pick_flanking_exons()) as the
+  # up/downstream flanks -- shared by every "click a row, jump to Design"
+  # entry point: Exon Extractor's real-exon table, its manual candidate-exon
+  # coordinates, and the Cryptic Exon Engine's novel-junction/candidate-exon
+  # tables. Takes tx_info = list(tx, name, gene_symbol) instead of reading
+  # shared_selected_tx() directly so any panel with its own annotated
+  # transcript (e.g. cryptic_res()$transcript) can reuse it, and err_setter
+  # so failures surface back on whichever panel the user clicked from.
+  # pick_flanking_exons() no longer requires either side to exist, so a target
+  # at/before the first exon or at/after the last exon anchors that side
+  # within the target region itself (a plain, non-junction primer) instead of
+  # failing; ce_lengths comes back empty in that case since there's nothing
+  # being included/excluded, just one splice junction to confirm.
+  run_design_handoff <- function(tx_info, assembly, target_start, target_end, target_label, err_setter) {
+    err_setter(NULL)
+    tx <- tx_info$tx
+    flanks <- pick_flanking_exons(tx, target_start, target_end, strand = tx$strand[1])
+
+    if (is.null(flanks$upstream) && is.null(flanks$downstream)) {
+      err_setter("No annotated exon found on either side of this region in the loaded transcript -- can't anchor a junction primer here.")
+      return(invisible())
+    }
+    if (is.null(flanks$upstream)) {          # target sits at/before the first exon
+      up_exon <- list(name = target_label, start = target_start, end = target_end)
+      dn_exon <- flanks$downstream; ce_vals <- numeric(0)
+    } else if (is.null(flanks$downstream)) { # target sits at/after the last exon
+      up_exon <- flanks$upstream
+      dn_exon <- list(name = target_label, start = target_start, end = target_end); ce_vals <- numeric(0)
+    } else {
+      up_exon <- flanks$upstream; dn_exon <- flanks$downstream
+      ce_vals <- target_end - target_start + 1
+    }
+
+    # a flanking region shorter than ~20 bp can't host a real primer while staying
+    # specific to the spliced mRNA (extending into the intron isn't a valid fix
+    # for this assay) -- catch that here, before sending the user to Design with
+    # a combination primer3 can never satisfy no matter how they adjust Tm/GC.
+    MIN_FLANK_BP <- 20
+    up_len <- up_exon$end - up_exon$start + 1
+    dn_len <- dn_exon$end - dn_exon$start + 1
+    if (up_len < MIN_FLANK_BP || dn_len < MIN_FLANK_BP) {
+      short_name <- if (up_len < MIN_FLANK_BP) up_exon$name else dn_exon$name
+      short_len <- if (up_len < MIN_FLANK_BP) up_len else dn_len
+      err_setter(sprintf(
+        "%s is only %d bp — too short to place a primer in (needs at least %d bp). Pick a different target; primer3 can't fix this by relaxing Tm/GC/product size.",
+        short_name, short_len, MIN_FLANK_BP))
+      return(invisible())
+    }
+    # even when each side clears the per-side minimum above, primer3 also needs
+    # the two sides COMBINED (each capped at the "flank" width used for design)
+    # to reach the minimum product size, or it rejects the template outright.
+    flank_width <- if (is.null(input$flank) || is.na(input$flank)) 140 else input$flank
+    total_template <- min(flank_width, up_len) + min(flank_width, dn_len)
+    if (total_template < DEFAULT_PRODUCT_SIZE_RANGE[1]) {
+      err_setter(sprintf(
+        "This region's flanking sequence only provides %d bp combined (%s: %d bp + %s: %d bp), but the minimum product size is %d bp. Pick a different target; primer3 can't fix this by relaxing Tm/GC.",
+        total_template, up_exon$name, min(flank_width, up_len),
+        dn_exon$name, min(flank_width, dn_len), DEFAULT_PRODUCT_SIZE_RANGE[1]))
+      return(invisible())
+    }
+
+    updateTextInput(session, "gene", value = tx_info$gene_symbol %||% tx_info$name)
+    updateTextInput(session, "citation", value = sprintf("Derived from UCSC RefSeq annotation (%s, %s)",
+                                                          tx_info$name, assembly))
+    updateTextInput(session, "doi", value = "")
+    updateTextInput(session, "assembly", value = assembly)
+    updateTextInput(session, "chrom", value = tx$chrom[1])
+    updateRadioButtons(session, "strand", selected = tx$strand[1])
+    updateTextInput(session, "up_name", value = up_exon$name)
+    updateNumericInput(session, "up_start", value = up_exon$start)
+    updateNumericInput(session, "up_end", value = up_exon$end)
+    updateTextInput(session, "dn_name", value = dn_exon$name)
+    updateNumericInput(session, "dn_start", value = dn_exon$start)
+    updateNumericInput(session, "dn_end", value = dn_exon$end)
+    updateTextInput(session, "ce_lengths", value = if (length(ce_vals) == 0) "" else as.character(ce_vals))
+
+    updateTabsetPanel(session, "tool_tabs", selected = "design")
+    goto_design_step(2)
+  }
+
+  observeEvent(input$extractor_design_go, {
+    req(extractor_seqs(), shared_selected_tx())
+    sel <- input$extractor_exon_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) { extractor_err("Select an exon row first."); return(invisible()) }
+    ex <- extractor_seqs()$exons[sel, ]
+    run_design_handoff(shared_selected_tx(), input$explorer_assembly, ex$start, ex$end,
+                        sprintf("Exon %d", ex$exon_number), extractor_err)
+  })
+
+  observeEvent(input$extractor_design_custom_go, {
+    req(shared_selected_tx())
+    s <- input$extractor_custom_start; e <- input$extractor_custom_end
+    if (is.null(s) || is.null(e) || is.na(s) || is.na(e)) {
+      extractor_err("Enter both a start and an end coordinate."); return(invisible())
+    }
+    if (s >= e) { extractor_err("Start must come before end."); return(invisible()) }
+    run_design_handoff(shared_selected_tx(), input$explorer_assembly, s, e, "Candidate exon", extractor_err)
+  })
+
+  observeEvent(input$cryptic_design_junc_go, {
+    req(cryptic_res())
+    if (is.null(cryptic_res()$transcript)) {
+      cryptic_err("No annotated transcript in this region -- can't anchor a primer design here."); return(invisible())
+    }
+    sel <- input$cryptic_junc_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) { cryptic_err("Select a junction row first."); return(invisible()) }
+    df <- cryptic_res()$candidates$novel_junctions[sel, ]
+    tx <- cryptic_res()$transcript
+    run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
+                        input$cryptic_assembly, df$start, df$end,
+                        sprintf("Novel junction %s:%d-%d", cryptic_res()$chrom, df$start, df$end),
+                        cryptic_err)
+  })
+
+  observeEvent(input$cryptic_design_exon_go, {
+    req(cryptic_res())
+    if (is.null(cryptic_res()$transcript)) {
+      cryptic_err("No annotated transcript in this region -- can't anchor a primer design here."); return(invisible())
+    }
+    sel <- input$cryptic_exon_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) { cryptic_err("Select a candidate exon row first."); return(invisible()) }
+    df <- cryptic_res()$candidates$candidate_exons[sel, ]
+    tx <- cryptic_res()$transcript
+    run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
+                        input$cryptic_assembly, df$start, df$end, "Candidate cryptic exon",
+                        cryptic_err)
+  })
+
+  # -- same hand-off, triggered by clicking "Design primers for this ->" inside
+  # a pinned tooltip on the sashimi plot itself (SASHIMI_JS's click delegate on
+  # .sashimi-design-link), instead of selecting a DT row first --
+  observeEvent(input$cryptic_plot_design_target, {
+    req(cryptic_res())
+    if (is.null(cryptic_res()$transcript)) {
+      cryptic_err("No annotated transcript in this region -- can't anchor a primer design here."); return(invisible())
+    }
+    tgt <- input$cryptic_plot_design_target
+    tx <- cryptic_res()$transcript
+    label <- if (identical(tgt$kind, "annotated_exon")) (tgt$name %||% "Exon")
+      else if (identical(tgt$kind, "exon")) "Candidate cryptic exon"
+      else sprintf("Novel junction %s:%d-%d", cryptic_res()$chrom, as.integer(tgt$start), as.integer(tgt$end))
+    run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
+                        input$cryptic_assembly, as.integer(tgt$start), as.integer(tgt$end), label,
+                        cryptic_err)
+  })
+
+  # ---- DESIGN ----
+  doi_err <- reactiveVal(NULL)
+  observeEvent(input$doi_lookup, {
+    doi_err(NULL)
+    tryCatch({
+      res <- lookup_citation(input$doi)
+      updateTextInput(session, "citation", value = res$citation)
+    }, error = function(e) doi_err(conditionMessage(e)))
+  })
+  output$doi_status <- renderUI({
+    if (!is.null(doi_err())) div(style = "color:var(--l2b-danger); font-size:12px; margin-top:6px;", doi_err()) else NULL
+  })
+
+  # -- wizard step navigation --
+  design_step <- reactiveVal(1)
+  goto_design_step <- function(n) {
+    design_step(n)
+    updateTabsetPanel(session, "design_wizard", selected = as.character(n))
+  }
+  output$design_stepper <- renderUI({
+    l2b_stepper(c("Gene & Source", "Genomic Location", "Design Inputs", "Results"),
+                design_step(), ids = paste0("design_goto_", 1:4))
+  })
+  for (i in 1:4) local({
+    ii <- i
+    observeEvent(input[[paste0("design_goto_", ii)]], goto_design_step(ii))
+  })
+  observeEvent(input$design_next1, goto_design_step(2))
+  observeEvent(input$design_back2, goto_design_step(1))
+  observeEvent(input$design_back3, goto_design_step(2))
+  observeEvent(input$design_back4, goto_design_step(3))
+
+  design_step2_err <- reactiveVal(NULL)
+  observeEvent(input$design_next2, {
+    if (input$up_start >= input$up_end || input$dn_start >= input$dn_end) {
+      design_step2_err("Exon start must come before its end.")
+    } else {
+      design_step2_err(NULL)
+      goto_design_step(3)
+    }
+  })
+  output$design_step2_err_ui <- renderUI({
+    if (!is.null(design_step2_err())) l2b_err(design_step2_err())
+  })
+  output$design_step3_err_ui <- renderUI({
+    if (!is.null(design_err())) l2b_err(design_err())
+  })
+
+  design_res <- reactiveVal(NULL); design_err <- reactiveVal(NULL)
+  observeEvent(input$generate, {
+    design_err(NULL); design_res(NULL)
+    # ce_lengths is now optional: leaving it blank means "no CE variant, just
+    # confirm the single available junction" (the terminal-exon case) --
+    # a blank/unparseable field already parses to numeric(0) here naturally.
+    ce <- suppressWarnings(as.numeric(trimws(strsplit(input$ce_lengths, ",")[[1]])))
+    ce <- ce[!is.na(ce)]
+    if (input$up_start >= input$up_end || input$dn_start >= input$dn_end) {
+      design_err("Exon start must come before its end."); return(invisible()) }
+    product_range <- if (identical(input$primer_mode, "qpcr")) QPCR_PRODUCT_SIZE_RANGE else DEFAULT_PRODUCT_SIZE_RANGE
+    withProgress(message = "Designing primers...", value = 0.3, {
+      tryCatch({
+        incProgress(0.3, detail = "fetching reference sequence")
+        assay <- design_from_coords(
+          gene = trimws(input$gene), assembly = trimws(input$assembly), chrom = trimws(input$chrom),
+          strand = input$strand,
+          upstream_exon = list(name = trimws(input$up_name), start = input$up_start, end = input$up_end),
+          downstream_exon = list(name = trimws(input$dn_name), start = input$dn_start, end = input$dn_end),
+          ce_lengths = ce, citation = trimws(input$citation), doi = trimws(input$doi), flank = input$flank,
+          product_size_range = product_range)
+        incProgress(0.4, detail = "building figure")
+        design_res(assay)
+        goto_design_step(4)
+      }, error = function(e) design_err(conditionMessage(e)))
+    })
+  })
+
+  design_html <- reactive({
+    req(design_res())
+    build_html(design_res(), dark = dark_mode())
+  })
+
+  output$design_out <- renderUI({
+    if (!is.null(design_err())) return(div(class = "l2b-card", l2b_err(design_err())))
+    if (is.null(design_res())) return(div(class = "l2b-card",
+      l2b_empty("\U0001f9ec", "No design yet", "Fill in the coordinates and click Generate.")))
+    a <- design_res()
+    p <- a$products
+    tagList(
+      div(class = "l2b-card",
+        l2b_hero(
+          l2b_stat("Canonical product", sprintf("%d bp", p[[1]]$size),
+                   if (length(p) > 1) "TDP-43 present" else "confirmed junction"),
+          if (length(p) > 1) l2b_stat("CE included", sprintf("%d bp", p[[2]]$size), "TDP-43 depleted", "accent"),
+          if (length(p) > 1) l2b_stat("Size shift", sprintf("+%d bp", p[[2]]$size - p[[1]]$size), "detectable on one gel")
+        ),
+        tags$iframe(srcdoc = design_html(),
+                    style = "width:100%; height:1650px; border:1px solid var(--l2b-border); border-radius:10px;")
+      )
+    )
+  })
+  output$download_ui <- renderUI({
+    req(design_res())
+    downloadButton("download_html", "⬇ Download HTML figure", class = "btn-dl")
+  })
+  output$download_html <- downloadHandler(
+    filename = function() sprintf("%s_schematic.html", gsub("[^A-Za-z0-9]", "_", input$gene)),
+    content = function(f) writeLines(build_html(design_res(), dark = FALSE), f))
+
+  design_aside <- function() {
+    a <- design_res()
+    tagList(
+      l2b_aside_card("At a glance",
+        if (!is.null(design_err())) l2b_aside_status(FALSE, design_err())
+        else if (is.null(a)) div(class = "l2b-aside-note", "Fill in the steps and generate a design to see status here.")
+        else tagList(
+          l2b_aside_status(TRUE, sprintf("Strand: %s", if (identical(input$strand, "-")) "minus" else "plus")),
+          if (length(a$products) > 1) l2b_aside_status(TRUE, sprintf("Cryptic exon(s): %s bp",
+            paste(vapply(a$products[-1], function(p) p$size - a$products[[1]]$size, numeric(1)), collapse = ", "))),
+          if (length(a$products) > 1)
+            l2b_aside_status(TRUE, sprintf("Size shift: +%d bp (one gel)", a$products[[2]]$size - a$products[[1]]$size))
+          else l2b_aside_status(TRUE, "Single confirmed junction (no CE variant)")
+        )),
+      if (!is.null(a)) l2b_aside_card("Design quality",
+        { qc <- design_quality_checklist(a); score <- design_quality_score(qc)
+          tagList(
+            div(style = "display:flex; align-items:baseline; gap:8px; margin-bottom:12px;",
+                div(style = "font-size:28px; font-weight:800; color:var(--l2b-text);", score$score),
+                div(style = "font-size:13px; color:var(--l2b-text-muted);",
+                    sprintf("/100 · %s · %d of %d checks", score$label, score$n_pass, score$n_total))),
+            lapply(seq_len(nrow(qc)), function(i) l2b_quality_item(qc$ok[i], qc$label[i]))
+          ) }),
+      if (!is.null(a)) l2b_aside_card("Validate externally",
+        { pmin <- max(50, a$products[[1]]$size - 30); pmax <- a$products[[length(a$products)]]$size + 50
+          # the real genomic distance between the primers (spanning the intron
+          # they skip) -- UCSC's In-Silico PCR searches genomic DNA, so its
+          # search window has to cover this or it reports "no results" for a
+          # perfectly good junction-spanning design (see primer_validation.R).
+          fwd <- a$primers$fwd; rev <- a$primers$rev
+          span <- if (!is.null(fwd$start) && !is.na(fwd$start) && !is.null(rev$start) && !is.na(rev$start))
+            max(fwd$start, fwd$end, rev$start, rev$end) - min(fwd$start, fwd$end, rev$start, rev$end) + 1 else NA_integer_
+          links <- primer_validation_links(fwd$seq, rev$seq, pmin, pmax,
+                                           assembly = trimws(input$assembly), genomic_span = span)
+          lapply(links, function(l) l2b_aside_ext_link(l$url, if (l$prefilled) "✓" else "↪", l$label, l$note)) }),
+      l2b_aside_card("Quick actions",
+        l2b_aside_link("aside_nav_plasmid", TOOL_BY_ID$plasmid$icon, "Open Plasmid Creator"),
+        l2b_aside_link("aside_nav_pcr", TOOL_BY_ID$pcr$icon, "Run PCR Setup"))
+    )
+  }
+
+  # ---- CRYPTIC EXON ENGINE ----
+  cryptic_res <- reactiveVal(NULL); cryptic_err <- reactiveVal(NULL)
+  cryptic_interp <- reactiveVal(NULL); cryptic_interp_err <- reactiveVal(NULL)
+  cryptic_interp_busy <- reactiveVal(FALSE); cryptic_history <- reactiveVal(character(0))
+  # per-session (not global) so concurrent sessions can't serve each other's
+  # tracks, and everything is released when the session ends
+  cryptic_cache <- new_bam_cache()
+  # set once a run succeeds; lets zoom (below) re-run run_cryptic_detection()
+  # at a new window without re-resolving or re-materializing the BAMs
+  cryptic_bam_info <- reactiveVal(NULL)
+
+  cryptic_resolve_bams <- function(label) {
+    workdir <- file.path(tempdir(), paste0("cryptic_", session$token))
+    if (identical(input$cryptic_bam_source, "path")) {
+      resolve_local_bams(if (identical(label, "control")) input$cryptic_control_paths
+                          else input$cryptic_kd_paths, label)
+    } else {
+      materialize_bam_uploads(if (identical(label, "control")) input$cryptic_control_files
+                               else input$cryptic_kd_files, label, workdir)
+    }
+  }
+
+  observeEvent(input$cryptic_go, {
+    cryptic_err(NULL); cryptic_res(NULL)
+    withProgress(message = "Scanning for cryptic exons...", value = 0.05, {
+      tryCatch({
+        incProgress(0.1, detail = "resolving locus")
+        locus <- parse_locus_input(input$cryptic_locus, assembly = input$cryptic_assembly)
+
+        incProgress(0.2, detail = "reading control BAM(s)")
+        control_bams <- cryptic_resolve_bams("control")
+        incProgress(0.3, detail = "reading knockdown BAM(s)")
+        kd_bams <- cryptic_resolve_bams("knockdown")
+
+        thresholds <- list(min_kd_reads = input$cryptic_min_kd_reads,
+                           max_control_reads = input$cryptic_max_ctrl_reads,
+                           exon_min = input$cryptic_exon_min, exon_max = input$cryptic_exon_max)
+        incProgress(0.3, detail = "detecting + building figure")
+        res <- run_cryptic_detection(locus, control_bams, kd_bams, input$cryptic_assembly,
+                                     thresholds, cryptic_cache)
+        # the "full view" a double-click zoom / reset can always get back to
+        res$orig_start <- locus$start; res$orig_end <- locus$end
+
+        cryptic_bam_info(list(control = control_bams, kd = kd_bams, assembly = input$cryptic_assembly))
+        cryptic_res(res)
+        cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
+      }, error = function(e) cryptic_err(conditionMessage(e)))
+    })
+  })
+
+  # -- IGV-style zoom: double-click a point in the plot, or the zoom
+  # in/out/reset buttons (all client-side, SASHIMI_JS) -- to re-run detection
+  # at a new window. No withProgress here: unlike the initial run, this reads
+  # an already-resolved, already-indexed BAM over what's usually a *narrower*
+  # window, through the same cache, so it's fast enough that Shiny's default
+  # "recalculating" dimming on uiOutput is feedback enough.
+  observeEvent(input$cryptic_zoom_to, {
+    req(cryptic_res(), cryptic_bam_info())
+    prev <- cryptic_res(); bams <- cryptic_bam_info()
+    tgt <- input$cryptic_zoom_to
+    new_start <- max(1, round(as.numeric(tgt$start)))
+    new_end <- max(new_start + 1, round(as.numeric(tgt$end)))
+    locus <- list(chrom = prev$chrom, start = new_start, end = new_end, label = prev$label)
+    tryCatch({
+      res <- run_cryptic_detection(locus, bams$control, bams$kd, bams$assembly, prev$thresholds, cryptic_cache)
+      res$orig_start <- prev$orig_start %||% prev$start
+      res$orig_end <- prev$orig_end %||% prev$end
+      cryptic_res(res)
+      cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
+    }, error = function(e) cryptic_err(conditionMessage(e)))
+  })
+
+  output$cryptic_out <- renderUI({
+    if (!is.null(cryptic_err())) return(div(class = "l2b-card", l2b_err(cryptic_err())))
+    if (is.null(cryptic_res())) return(div(class = "l2b-card",
+      l2b_empty("\U0001f52c", "No scan yet", "Enter a locus, upload both BAMs, and click Run detection.")))
+    r <- cryptic_res()
+    n_nj <- nrow(r$candidates$novel_junctions); n_ce <- nrow(r$candidates$candidate_exons)
+    gene_lbl <- if (!is.null(r$transcript)) r$transcript$name[1] else "—"
+    max_j_reads <- max(1, r$control$junctions$reads, r$knockdown$junctions$reads)
+    tagList(
+      div(class = "l2b-card",
+        l2b_hero(
+          l2b_stat("Region", r$label, sprintf("%s · %.1f kb", r$chrom, (r$end - r$start) / 1000)),
+          l2b_stat("Transcript", gene_lbl, if (r$n_other_isoforms > 0) sprintf("+%d more isoforms", r$n_other_isoforms) else "single isoform"),
+          l2b_stat("Novel junctions", n_nj, "in KD, not annotated", if (n_nj > 0) "accent" else ""),
+          l2b_stat("Candidate exons", n_ce, "paired novel junctions", if (n_ce > 0) "bad" else "good")
+        ),
+        div(style = "display:flex; flex-direction:column; gap:10px; margin-bottom:10px; padding:12px 14px; background:var(--l2b-surface-2); border:1px solid var(--l2b-border); border-radius:10px;",
+            div(style = "display:flex; gap:24px; align-items:center; flex-wrap:wrap;",
+                div(style = "flex:1 1 240px;",
+                    tags$label(style = "font-size:12.5px; color:var(--l2b-text-muted); display:block; margin-bottom:4px;",
+                               "Min. junction reads: ", tags$span(id = "sashimi_filter_val", "1")),
+                    tags$input(type = "range", class = "sashimi-filter-reads", min = "1",
+                               max = as.character(max_j_reads), value = "1", step = "1",
+                               style = "width:100%; accent-color:var(--l2b-accent);")),
+                tags$label(style = "display:flex; align-items:center; gap:7px; font-size:13px; color:var(--l2b-text-muted); cursor:pointer; user-select:none; flex:none;",
+                           tags$input(type = "checkbox", class = "sashimi-filter-novel"), "Novel junctions only")),
+            div(style = "display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding-top:2px; border-top:1px solid var(--l2b-border);",
+                div(class = "l2b-sashimi-toolbar",
+                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-in", title = "Zoom in (or double-click the plot)", "🔍+"),
+                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-out", title = "Zoom out", "🔍−"),
+                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-reset", title = "Reset to the full requested region", "⟲"),
+                    div(class = "l2b-sashimi-toolbar-sep"),
+                    tags$button(type = "button", class = "sashimi-expand-toggle", "⤢ Expand view"),
+                    tags$button(type = "button", class = "sashimi-fullscreen-toggle", "⛶ Full screen")),
+                div(style = "font-size:11.5px; color:var(--l2b-text-faint); flex:1 1 auto;",
+                    "Hover a feature for detail · click to pin · double-click the plot to zoom in · both filters apply instantly"))),
+        div(class = "l2b-sashimi", HTML(sashimi_svg(r, dark = dark_mode()))),
+        div(class = "l2b-fig-cap",
+            "Coverage wiggles (control blue, knockdown orange) share one depth scale; arcs are splice junctions, thickness and height scaled by supporting reads and labelled with the count. Novel junctions are drawn in red. Drag to scroll if the region is wide."),
+        br(),
+        div(style = "display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px;",
+            downloadButton("cryptic_download_pdf", "Download PDF figure", class = "btn-dl"),
+            downloadButton("cryptic_download_html", "Download HTML figure", class = "btn-dl"),
+            downloadButton("cryptic_download_csv", "Download candidates (CSV)", class = "btn-dl")),
+        div(class = "l2b-card-title", "Candidate novel splice junctions"),
+        DTOutput("cryptic_junc_tbl"),
+        p(class = "l2b-card-sub", "Select a junction row above, then jump straight to the Primer Designer — no manual coordinate entry."),
+        actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;"),
+        br(), br(),
+        div(class = "l2b-card-title", "Candidate cryptic-exon spans"),
+        DTOutput("cryptic_exon_tbl"),
+        p(class = "l2b-card-sub", "Select a span row above, then jump straight to the Primer Designer — no manual coordinate entry."),
+        actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;"),
+        br(), br(),
+        div(class = "l2b-card-title", "Differential splicing (PSI / ΔPSI)"),
+        p(class = "l2b-card-sub",
+          sprintf(paste0("%d control / %d knockdown replicate(s). PSI = junction reads ÷ reads across all ",
+                         "junctions sharing its donor or acceptor site (an intron cluster); p-values are a ",
+                         "per-junction Fisher's exact test on that 2×2 table, FDR-adjusted (q). This is a ",
+                         "lighter-weight V1 -- a real replicate-variance model (as LeafCutter uses) is future work."),
+                  r$control$n_replicates %||% 1L, r$knockdown$n_replicates %||% 1L)),
+        DTOutput("cryptic_diff_tbl"),
+        div(style = "margin-top:10px;", downloadButton("cryptic_download_diff_csv", "Download differential splicing (CSV)", class = "btn-dl"))
+      ),
+      div(class = "l2b-card",
+        div(class = "l2b-card-title", "\U0001f9e0 Interpret with a local model"),
+        p(class = "l2b-card-sub",
+          "Runs fully on your machine via Ollama (qwen3:8b). Grounded in the numbers above; PubMed context is used only as attributed background. Assistance, not proof — verify candidates by eye and RT-PCR."),
+        uiOutput("cryptic_interp_out")
+      )
+    )
+  })
+
+  # -- interpretation output (button, streamed result, follow-up box) --
+  output$cryptic_interp_out <- renderUI({
+    busy <- cryptic_interp_busy()
+    interp <- cryptic_interp()
+    tagList(
+      if (!is.null(cryptic_interp_err())) l2b_err(cryptic_interp_err()),
+      if (is.null(interp) && !busy)
+        actionButton("cryptic_interpret", "Interpret these results", class = "btn-run", style = "width:auto;"),
+      if (busy) div(class = "l2b-aside-note", "Thinking locally… (first run also loads the model, which can take a moment)"),
+      if (!is.null(interp)) {
+        tagList(
+          div(class = "l2b-llm-answer", HTML(gsub("\n", "<br>", interp$text))),
+          if (!is.null(interp$sources) && nrow(interp$sources) > 0)
+            div(class = "l2b-llm-sources",
+              strong("Literature context used (background only): "),
+              HTML(paste(sprintf('<a href="https://pubmed.ncbi.nlm.nih.gov/%s/" target="_blank">[%d] %s</a>',
+                                 interp$sources$pmid, seq_len(nrow(interp$sources)),
+                                 interp$sources$title), collapse = " &middot; "))),
+          br(),
+          div(style = "display:flex; gap:8px; align-items:flex-start;",
+            div(style = "flex:1;", textInput("cryptic_followup", NULL, placeholder = "Ask a follow-up question about this result…", width = "100%")),
+            actionButton("cryptic_ask", "Ask", class = "btn-alt", style = "width:auto; flex:none;"))
+        )
+      }
+    )
+  })
+  output$cryptic_junc_tbl <- renderDT({
+    req(cryptic_res()); df <- cryptic_res()$candidates$novel_junctions
+    if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
+    out <- data.frame(
+      Junction = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
+      `KD reads` = df$kd_reads, `Control reads` = df$control_reads, check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  }, server = TRUE)
+  output$cryptic_exon_tbl <- renderDT({
+    req(cryptic_res()); df <- cryptic_res()$candidates$candidate_exons
+    if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
+    out <- data.frame(
+      Span = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
+      `Length (bp)` = df$length, `KD reads` = df$kd_reads, `Control reads` = df$control_reads, check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  }, server = TRUE)
+  output$cryptic_diff_tbl <- renderDT({
+    req(cryptic_res()); df <- cryptic_res()$differential
+    if (is.null(df) || nrow(df) == 0) return(l2b_result_table(data.frame(Message = "No junctions with enough pooled reads to test.")))
+    l2b_result_table(data.frame(
+      Junction = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
+      `Cluster size` = df$cluster_size,
+      `PSI (control)` = sprintf("%.2f", df$psi_control),
+      `PSI (KD)` = sprintf("%.2f", df$psi_kd),
+      `ΔPSI` = sprintf("%+.2f", df$delta_psi),
+      `p-value` = signif(df$p_value, 3), `q-value` = signif(df$q_value, 3),
+      Novel = ifelse(df$novel, "yes", "no"), check.names = FALSE))
+  }, server = FALSE)
+  output$cryptic_download_pdf <- downloadHandler(
+    filename = function() sprintf("%s_cryptic_exon_engine.pdf", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) html_to_pdf(build_sashimi_html(cryptic_res(), dark = FALSE), f))
+  output$cryptic_download_html <- downloadHandler(
+    filename = function() sprintf("%s_cryptic_exon_engine.html", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) writeLines(build_sashimi_html(cryptic_res(), dark = FALSE), f))
+  output$cryptic_download_csv <- downloadHandler(
+    filename = function() sprintf("%s_candidate_exons.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) write.csv(cryptic_res()$candidates$candidate_exons, f, row.names = FALSE))
+  output$cryptic_download_diff_csv <- downloadHandler(
+    filename = function() sprintf("%s_differential_splicing.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) write.csv(cryptic_res()$differential, f, row.names = FALSE))
+
+  # -- local-model interpretation (Ollama; grounded in the computed result) --
+  .run_cryptic_interp <- function(question = NULL) {
+    cryptic_interp_err(NULL); cryptic_interp_busy(TRUE)
+    on.exit(cryptic_interp_busy(FALSE), add = TRUE)
+    tryCatch({
+      out <- interpret_cryptic_result(cryptic_res(), model = "qwen3:8b",
+                                      question = question, history = cryptic_history())
+      if (!is.null(question)) {
+        cryptic_history(c(cryptic_history(), sprintf("Q: %s\nA: %s", question, out$text)))
+      }
+      # keep the sources from the first interpretation visible on follow-ups
+      prev <- cryptic_interp()
+      src <- if (!is.null(out$sources)) out$sources else if (!is.null(prev)) prev$sources else NULL
+      cryptic_interp(list(text = out$text, sources = src))
+    }, error = function(e) cryptic_interp_err(conditionMessage(e)))
+  }
+  observeEvent(input$cryptic_interpret, {
+    req(cryptic_res()); withProgress(message = "Interpreting locally...", value = 0.5, .run_cryptic_interp())
+  })
+  observeEvent(input$cryptic_ask, {
+    q <- trimws(input$cryptic_followup %||% "")
+    if (nzchar(q)) {
+      withProgress(message = "Thinking locally...", value = 0.5, .run_cryptic_interp(question = q))
+      updateTextInput(session, "cryptic_followup", value = "")
+    }
+  })
+
+  # ---- qPCR ----
+  output$qpcr_calib <- renderUI({
+    ch <- qpcr_grid()$Sample
+    selectInput("qpcr_calibrator", NULL, choices = ch, selected = ch[1], width = "100%")
+  })
+  qpcr_res <- reactiveVal(NULL); qpcr_err <- reactiveVal(NULL)
+  observeEvent(input$qpcr_go, {
+    qpcr_err(NULL); qpcr_res(NULL)
+    df <- qpcr_grid()
+    df <- df[!is.na(df[[2]]) & !is.na(df[[3]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
+    if (nrow(df) == 0) { qpcr_err("Fill in at least one complete row."); return(invisible()) }
+    if (!(input$qpcr_calibrator %in% df[[1]])) { qpcr_err("Calibrator must be a sample with complete values."); return(invisible()) }
+    dl <- setNames(lapply(seq_len(nrow(df)), function(i) list(target = df[[2]][i], reference = df[[3]][i])), df[[1]])
+    out <- tryCatch(relative_expression(dl, calibrator = input$qpcr_calibrator), error = function(e) e)
+    if (inherits(out, "error")) qpcr_err(conditionMessage(out)) else qpcr_res(out)
+  })
+  output$qpcr_out <- renderUI({
+    if (!is.null(qpcr_err())) return(div(class = "l2b-card", l2b_err(qpcr_err())))
+    if (is.null(qpcr_res())) return(div(class = "l2b-card", l2b_empty("\U0001f4c9", "No results yet", "Enter Ct values and click Calculate.")))
+    r <- qpcr_res(); df <- r$samples
+    nc <- df[df$name != r$calibrator, , drop = FALSE]
+    top <- if (nrow(nc) > 0) nc[which.max(abs(nc$ddct)), ] else NULL
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Results"),
+      p(class = "l2b-card-sub", sprintf("Relative to %s", r$calibrator)),
+      l2b_hero(
+        l2b_stat("Calibrator", r$calibrator, "fold = 1.00"),
+        l2b_stat("Samples", nrow(df), "analyzed"),
+        if (!is.null(top)) l2b_stat("Largest change", sprintf("%.2f×", top$fold_change),
+              sprintf("%s (ΔΔCt %+.2f)", top$name, top$ddct),
+              if (top$fold_change > 1) "good" else "bad")
+      ),
+      DTOutput("qpcr_tbl"),
+      l2b_warn(r$warnings)
+    )
+  })
+  output$qpcr_tbl <- renderDT({
+    req(qpcr_res()); df <- qpcr_res()$samples
+    out <- data.frame(Sample = df$name, `Ct target` = round(df$ct_target, 2),
+                      `Ct ref` = round(df$ct_reference, 2), dCt = round(df$dct, 2),
+                      ddCt = round(df$ddct, 2), Fold = round(df$fold_change, 3), check.names = FALSE)
+    names(out)[4:5] <- c("ΔCt", "ΔΔCt")
+    datatable(out, rownames = FALSE, selection = "none",
+              options = list(dom = "t", paging = FALSE, ordering = FALSE)) |>
+      formatStyle("Fold", fontWeight = "bold",
+                  color = styleInterval(c(0.999, 1.001), c("#f2555b", "#e9ecf5", "#2fbf71")))
+  }, server = FALSE)
+
+  # ---- DENSITOMETRY ----
+  output$dens_ref <- renderUI({
+    ch <- dens_grid()$Lane
+    selectInput("dens_reference", NULL, choices = ch, selected = ch[1], width = "100%")
+  })
+  dens_res <- reactiveVal(NULL); dens_err <- reactiveVal(NULL)
+  observeEvent(input$dens_go, {
+    dens_err(NULL); dens_res(NULL)
+    df <- dens_grid()
+    df <- df[!is.na(df[[2]]) & !is.na(df[[3]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
+    if (nrow(df) == 0) { dens_err("Fill in at least one complete lane."); return(invisible()) }
+    if (!(input$dens_reference %in% df[[1]])) { dens_err("Reference must be a lane with complete values."); return(invisible()) }
+    ll <- setNames(lapply(seq_len(nrow(df)), function(i) list(target = df[[2]][i], control = df[[3]][i])), df[[1]])
+    out <- tryCatch(quantify_blot(ll, reference = input$dens_reference), error = function(e) e)
+    if (inherits(out, "error")) dens_err(conditionMessage(out)) else dens_res(out)
+  })
+  output$dens_out <- renderUI({
+    if (!is.null(dens_err())) return(div(class = "l2b-card", l2b_err(dens_err())))
+    if (is.null(dens_res())) return(div(class = "l2b-card", l2b_empty("\U0001f4ca", "No results yet", "Enter band intensities and click Calculate.")))
+    r <- dens_res(); df <- r$lanes
+    nr <- df[df$name != r$reference, , drop = FALSE]
+    top <- if (nrow(nr) > 0) nr[which.max(abs(log2(pmax(nr$relative, 1e-9)))), ] else NULL
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Results"),
+      p(class = "l2b-card-sub", sprintf("Relative to %s", r$reference)),
+      l2b_hero(
+        l2b_stat("Reference lane", r$reference, "set to 1.00"),
+        l2b_stat("Lanes", nrow(df), "analyzed"),
+        if (!is.null(top)) l2b_stat("Largest change", sprintf("%.2f×", top$relative), top$name,
+              if (top$relative > 1) "good" else "bad")
+      ),
+      DTOutput("dens_tbl"),
+      l2b_warn(r$warnings)
+    )
+  })
+  output$dens_tbl <- renderDT({
+    req(dens_res()); df <- dens_res()$lanes
+    out <- data.frame(Lane = df$name, Target = df$target, Control = df$control,
+                      Normalized = round(df$normalized, 4), Relative = round(df$relative, 3), check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "none",
+              options = list(dom = "t", paging = FALSE, ordering = FALSE)) |>
+      formatStyle("Relative", fontWeight = "bold",
+                  color = styleInterval(c(0.999, 1.001), c("#f2555b", "#e9ecf5", "#2fbf71")))
+  }, server = FALSE)
+
+  # ---- STANDARD CURVE ----
+  sc_res <- reactiveVal(NULL); sc_err <- reactiveVal(NULL)
+  observeEvent(input$sc_go, {
+    sc_err(NULL); sc_res(NULL)
+    std <- sc_std_grid(); samp <- sc_samp_grid()
+    std <- std[!is.na(std[[1]]) & !is.na(std[[2]]), , drop = FALSE]
+    samp <- samp[!is.na(samp[[2]]) & nzchar(trimws(samp[[1]])), , drop = FALSE]
+    if (nrow(std) < 2) { sc_err("Need at least two standards."); return(invisible()) }
+    if (nrow(samp) == 0) { sc_err("Need at least one sample."); return(invisible()) }
+    sv <- setNames(samp[[2]], samp[[1]])
+    out <- tryCatch(quantify(std[[1]], std[[2]], sv, degree = as.numeric(input$sc_degree)), error = function(e) e)
+    if (inherits(out, "error")) sc_err(conditionMessage(out)) else sc_res(out)
+  })
+  output$sc_out <- renderUI({
+    if (!is.null(sc_err())) return(div(class = "l2b-card", l2b_err(sc_err())))
+    if (is.null(sc_res())) return(div(class = "l2b-card", l2b_empty("\U0001f4c8", "No curve yet", "Enter standards and samples, then click Fit.")))
+    r <- sc_res()
+    bad_fit <- r$r_squared < 0.98
+    n_extrap <- sum(r$samples$extrapolated)
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Results"),
+      l2b_hero(
+        l2b_stat("R²", sprintf("%.4f", r$r_squared),
+                 if (bad_fit) "weak fit — re-check standards" else "good fit",
+                 if (bad_fit) "bad" else "good"),
+        l2b_stat("Slope", if (!is.na(r$slope)) sprintf("%.5g", r$slope) else "—", "absorbance per unit"),
+        l2b_stat("Intercept", sprintf("%.4g", r$intercept), "blank offset")
+      ),
+      DTOutput("sc_tbl"),
+      if (n_extrap > 0) l2b_warn(sprintf("%d sample(s) fall outside the standard range — those values are extrapolated and unreliable.", n_extrap))
+    )
+  })
+  output$sc_tbl <- renderDT({
+    req(sc_res()); df <- sc_res()$samples
+    out <- data.frame(Sample = df$name, Absorbance = round(df$absorbance, 4),
+                      Concentration = round(df$concentration, 3),
+                      Status = ifelse(df$extrapolated, "⚠ outside range", "✓ in range"),
+                      check.names = FALSE)
+    l2b_result_table(out)
+  }, server = FALSE)
+
+  # ---- NORMALIZATION ----
+  norm_res <- reactiveVal(NULL); norm_err <- reactiveVal(NULL)
+  observeEvent(input$norm_go, {
+    norm_err(NULL); norm_res(NULL)
+    df <- norm_grid()
+    df <- df[!is.na(df[[2]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
+    if (nrow(df) == 0) { norm_err("Enter at least one sample."); return(invisible()) }
+    cv <- setNames(df[[2]], df[[1]])
+    dye <- if (is.na(input$norm_dye)) NULL else input$norm_dye
+    out <- tryCatch(normalize(cv, target_protein_ug = input$norm_target,
+                              final_volume_uL = input$norm_vol, dye_fold = dye), error = function(e) e)
+    if (inherits(out, "error")) norm_err(conditionMessage(out)) else norm_res(out)
+  })
+  output$norm_out <- renderUI({
+    if (!is.null(norm_err())) return(div(class = "l2b-card", l2b_err(norm_err())))
+    if (is.null(norm_res())) return(div(class = "l2b-card", l2b_empty("⚖️", "No plan yet", "Enter concentrations and click Calculate.")))
+    r <- norm_res()
+    infeasible <- sum(!r$lanes$feasible)
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Loading plan"),
+      l2b_hero(
+        l2b_stat("Target", sprintf("%g µg", r$target_protein_ug), "per lane"),
+        l2b_stat("Final volume", sprintf("%g µL", r$final_volume_uL), "per lane"),
+        l2b_stat("Max feasible", sprintf("%.3g µg", r$max_feasible_target_ug),
+                 "limited by your most dilute sample",
+                 if (infeasible > 0) "bad" else "good")
+      ),
+      DTOutput("norm_tbl"),
+      if (infeasible > 0) l2b_warn(sprintf("%d sample(s) are too dilute to reach the target — lower the target to ≤ %.3g µg.",
+                                            infeasible, r$max_feasible_target_ug))
+    )
+  })
+  output$norm_tbl <- renderDT({
+    req(norm_res()); df <- norm_res()$lanes
+    out <- data.frame(Sample = df$name, Lysate = round(df$lysate_uL, 2),
+                      Water = round(df$water_uL, 2), Dye = round(df$dye_uL, 2),
+                      Total = round(df$final_uL, 2),
+                      Status = ifelse(df$feasible, "✓ OK", "⚠ too dilute"), check.names = FALSE)
+    names(out)[2:5] <- c("Lysate (µL)", "Water (µL)", "Dye (µL)", "Total (µL)")
+    l2b_result_table(out)
+  }, server = FALSE)
+
+  # ---- A280 ----
+  a280_res <- reactiveVal(NULL); a280_err <- reactiveVal(NULL)
+  observeEvent(input$a280_go, {
+    a280_err(NULL); a280_res(NULL)
+    df <- a280_grid()
+    df <- df[!is.na(df[[2]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
+    if (nrow(df) == 0) { a280_err("Enter at least one reading."); return(invisible()) }
+    sv <- setNames(df[[2]], df[[1]])
+    out <- tryCatch(a280_concentration(sv, extinction_coef = input$a280_epsilon, mw_da = input$a280_mw,
+                                       path_length_cm = input$a280_path, dilution_factor = input$a280_dilution),
+                    error = function(e) e)
+    if (inherits(out, "error")) a280_err(conditionMessage(out)) else a280_res(out)
+  })
+  output$a280_out <- renderUI({
+    if (!is.null(a280_err())) return(div(class = "l2b-card", l2b_err(a280_err())))
+    if (is.null(a280_res())) return(div(class = "l2b-card", l2b_empty("\U0001f9eb", "No results yet", "Enter A280 readings and click Calculate.")))
+    r <- a280_res()
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Concentrations"),
+      l2b_hero(
+        l2b_stat("ε", sprintf("%.4g", r$extinction_coef), "M⁻¹cm⁻¹"),
+        l2b_stat("MW", sprintf("%.4g Da", r$mw_da), sprintf("%.1f kDa", r$mw_da / 1000)),
+        l2b_stat("Path", sprintf("%.2g cm", r$path_length_cm),
+                 if (r$dilution_factor != 1) sprintf("%.3gx dilution applied", r$dilution_factor) else "neat")
+      ),
+      DTOutput("a280_tbl"),
+      l2b_warn(r$warnings)
+    )
+  })
+  output$a280_tbl <- renderDT({
+    req(a280_res()); df <- a280_res()$samples
+    out <- data.frame(Sample = df$name, A280 = round(df$a280_raw, 4),
+                      ConcUM = round(df$conc_uM, 3), ConcMgML = round(df$conc_mg_mL, 4),
+                      check.names = FALSE)
+    names(out)[3:4] <- c("Conc (µM)", "Conc (mg/mL)")
+    l2b_result_table(out)
+  }, server = FALSE)
+
+  # ---- PROTEIN PARAMS ----
+  pp_res <- reactiveVal(NULL); pp_err <- reactiveVal(NULL)
+  observeEvent(input$pp_go, {
+    pp_err(NULL); pp_res(NULL)
+    if (!nzchar(trimws(input$pp_sequence))) { pp_err("Enter a sequence."); return(invisible()) }
+    out <- tryCatch(protein_parameters(input$pp_sequence), error = function(e) e)
+    if (inherits(out, "error")) pp_err(conditionMessage(out)) else pp_res(out)
+  })
+  output$pp_out <- renderUI({
+    if (!is.null(pp_err())) return(div(class = "l2b-card", l2b_err(pp_err())))
+    if (is.null(pp_res())) return(div(class = "l2b-card", l2b_empty("\U0001f9ec", "No results yet", "Paste a sequence and click Compute.")))
+    r <- pp_res()
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Protein parameters"),
+      l2b_hero(
+        l2b_stat("Length", sprintf("%d aa", r$length_aa)),
+        l2b_stat("Molecular weight", sprintf("%.2f kDa", r$mw_da / 1000), sprintf("%.1f Da", r$mw_da)),
+        l2b_stat("Isoelectric point", sprintf("%.2f", r$pI), "approximate", "accent")
+      ),
+      l2b_hero(
+        l2b_stat("ε (reduced)", format(r$extinction$epsilon_reduced, big.mark = ","), "M⁻¹cm⁻¹ · free cysteines"),
+        l2b_stat("ε (cystine)", format(r$extinction$epsilon_cystines, big.mark = ","), "M⁻¹cm⁻¹ · disulfide-bonded"),
+        l2b_stat("Trp / Tyr / Cys", sprintf("%d / %d / %d", r$extinction$n_trp, r$extinction$n_tyr, r$extinction$n_cys),
+                 "residues driving A280")
+      ),
+      l2b_warn(c("pI is a Henderson-Hasselbalch approximation — cross-check against ExPASy ProtParam for anything that matters.",
+                 "Use the 'reduced' ε if your cysteines are free; 'cystine' if they form disulfide bonds."))
+    )
+  })
+
+  # ---- DILUTION ----
+  dil_res <- reactiveVal(NULL); dil_err <- reactiveVal(NULL)
+  observeEvent(input$dil_go, {
+    dil_err(NULL); dil_res(NULL)
+    df <- dil_grid()
+    df <- df[!is.na(df[[2]]) & !is.na(df[[3]]) & !is.na(df[[4]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
+    if (nrow(df) == 0) { dil_err("Fill in at least one complete row."); return(invisible()) }
+    names(df) <- c("name", "stock_conc", "final_conc", "final_vol")
+    dil_res(dilution_batch(df))
+  })
+  output$dil_out <- renderUI({
+    if (!is.null(dil_err())) return(div(class = "l2b-card", l2b_err(dil_err())))
+    if (is.null(dil_res())) return(div(class = "l2b-card", l2b_empty("\U0001f4a7", "No results yet", "Enter dilutions and click Calculate.")))
+    results <- dil_res()
+    n_err <- sum(sapply(results, function(r) !is.null(r$error)))
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Dilution plan"),
+      l2b_hero(
+        l2b_stat("Dilutions", length(results), "calculated"),
+        if (n_err > 0) l2b_stat("Problems", n_err, "row(s) impossible", "bad")
+      ),
+      DTOutput("dil_tbl")
+    )
+  })
+  output$dil_tbl <- renderDT({
+    req(dil_res())
+    rows <- lapply(dil_res(), function(r) {
+      if (!is.null(r$error)) {
+        data.frame(Name = r$name, `Add stock` = "—", `Add diluent` = "—",
+                   Dilution = "—", Status = paste("⚠", r$error), check.names = FALSE)
+      } else {
+        data.frame(Name = r$name, `Add stock` = sprintf("%.3g", r$stock_vol),
+                   `Add diluent` = sprintf("%.3g", r$diluent_vol),
+                   Dilution = sprintf("%.1f×", r$dilution_fold),
+                   Status = "✓ OK", check.names = FALSE)
+      }
+    })
+    l2b_result_table(do.call(rbind, rows))
+  }, server = FALSE)
+
+  # ---- PCR SETUP ----
+  pcr_res <- reactiveVal(NULL); pcr_err <- reactiveVal(NULL)
+  observeEvent(input$pcr_go, {
+    pcr_err(NULL); pcr_res(NULL)
+    pool <- pcr_pool_grid(); fix <- pcr_fix_grid()
+    pool <- pool[!is.na(pool[[2]]) & !is.na(pool[[3]]) & nzchar(trimws(pool[[1]])), , drop = FALSE]
+    fix <- fix[!is.na(fix[[2]]) & nzchar(trimws(fix[[1]])), , drop = FALSE]
+    if (nrow(pool) == 0 && nrow(fix) == 0) { pcr_err("Enter at least one component."); return(invisible()) }
+    comps <- list()
+    for (i in seq_len(nrow(pool)))
+      comps[[length(comps) + 1]] <- .pcr_component(pool[[1]][i], stock_conc = pool[[2]][i], final_conc = pool[[3]][i])
+    for (i in seq_len(nrow(fix)))
+      comps[[length(comps) + 1]] <- .pcr_component(fix[[1]][i], fixed_volume_uL = fix[[2]][i], pooled = FALSE)
+    out <- tryCatch(pcr_setup(comps, final_volume_uL = input$pcr_final_vol,
+                              num_reactions = input$pcr_num_rxn, excess_fold = input$pcr_excess),
+                    error = function(e) e)
+    if (inherits(out, "error")) pcr_err(conditionMessage(out)) else pcr_res(out)
+  })
+  output$pcr_out <- renderUI({
+    if (!is.null(pcr_err())) return(div(class = "l2b-card", l2b_err(pcr_err())))
+    if (is.null(pcr_res())) return(div(class = "l2b-card", l2b_empty("\U0001f9ea", "No mix yet", "Enter components and click Calculate.")))
+    r <- pcr_res()
+    total_mm <- sum(r$components$vol_master_mix_uL, na.rm = TRUE) + r$water_master_mix_uL
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Master mix"),
+      l2b_hero(
+        l2b_stat("Reactions", r$num_reactions, sprintf("+%.0f%% excess", (r$excess_fold - 1) * 100)),
+        l2b_stat("Per reaction", sprintf("%.1f µL", r$final_volume_uL), "final volume"),
+        l2b_stat("Total mix", sprintf("%.1f µL", total_mm), "prepare this much", "accent")
+      ),
+      DTOutput("pcr_tbl"),
+      l2b_warn(r$warnings)
+    )
+  })
+  output$pcr_tbl <- renderDT({
+    req(pcr_res()); r <- pcr_res(); df <- r$components
+    out <- data.frame(Component = df$name, PerRxn = round(df$vol_per_rxn_uL, 2),
+                      MasterMix = ifelse(is.na(df$vol_master_mix_uL), "add per tube",
+                                         sprintf("%.2f", df$vol_master_mix_uL)), check.names = FALSE)
+    out <- rbind(out, data.frame(Component = "Water", PerRxn = round(r$water_per_rxn_uL, 2),
+                                 MasterMix = sprintf("%.2f", r$water_master_mix_uL), check.names = FALSE))
+    names(out)[2:3] <- c("Per reaction (µL)", "Master mix (µL)")
+    l2b_result_table(out)
+  }, server = FALSE)
+
+  # ---- PLASMID ----
+  plasmid_res <- reactiveVal(NULL); plasmid_err <- reactiveVal(NULL)
+  observeEvent(input$pc_go, {
+    plasmid_err(NULL); plasmid_res(NULL)
+    df <- plasmid_grid()
+    df <- df[nzchar(trimws(df[[1]])) & nzchar(trimws(df[[3]])), , drop = FALSE]
+    if (nrow(df) == 0) { plasmid_err("Enter at least one part with a sequence."); return(invisible()) }
+    parts <- lapply(seq_len(nrow(df)), function(i)
+      list(name = df[[1]][i], type = df[[2]][i], sequence = df[[3]][i]))
+    out <- tryCatch(assemble_plasmid(parts), error = function(e) e)
+    if (inherits(out, "error")) { plasmid_err(conditionMessage(out)); return(invisible()) }
+    plasmid_res(out)
+  })
+  output$plasmid_out <- renderUI({
+    if (!is.null(plasmid_err())) return(div(class = "l2b-card", l2b_err(plasmid_err())))
+    if (is.null(plasmid_res())) return(div(class = "l2b-card", l2b_empty("\U0001f504", "No plasmid yet", "Enter parts and click Build.")))
+    r <- plasmid_res()
+    svg <- plasmid_map_svg(r, title = trimws(input$pc_title), dark = dark_mode())
+    doc_bg <- if (dark_mode()) "#12172a" else "#ffffff"
+    div(class = "l2b-card",
+      div(class = "l2b-card-title", "Plasmid map"),
+      l2b_hero(
+        l2b_stat("Total size", sprintf("%s bp", format(r$total_length, big.mark = ",")), "circular"),
+        l2b_stat("GC content", sprintf("%.1f%%", r$gc_percent)),
+        l2b_stat("Parts", nrow(r$features), "assembled")
+      ),
+      tags$iframe(srcdoc = sprintf('<div style="background:%s; margin:0;">%s</div>', doc_bg, svg),
+                  style = "width:100%; height:580px; border:1px solid var(--l2b-border); border-radius:10px;"),
+      br(), br(),
+      DTOutput("pc_tbl")
+    )
+  })
+  output$pc_tbl <- renderDT({
+    req(plasmid_res()); df <- plasmid_res()$features
+    l2b_result_table(data.frame(Feature = df$name, Type = df$type, Start = df$start,
+                                End = df$end, `Length (bp)` = df$length, check.names = FALSE))
+  }, server = FALSE)
+  output$pc_download_ui <- renderUI({
+    req(plasmid_res())
+    downloadButton("pc_download_fasta", "⬇ Download FASTA", class = "btn-dl")
+  })
+  output$pc_download_fasta <- downloadHandler(
+    filename = function() sprintf("%s.fasta", gsub("[^A-Za-z0-9]", "_", input$pc_title)),
+    content = function(f) {
+      r <- plasmid_res()
+      writeLines(c(sprintf(">%s (%d bp, circular)", input$pc_title, r$total_length),
+                   strsplit(r$full_sequence, "(?<=.{70})", perl = TRUE)[[1]]), f)
+    })
+
+  # ======================================================================
+  # RIGHT RAIL (aside) -- real per-tool status, no invented metrics.
+  # ======================================================================
+  status_row <- function(res, err, ready_fn) {
+    if (!is.null(err)) return(l2b_aside_status(FALSE, err))
+    if (is.null(res)) return(div(class = "l2b-aside-note", "No results yet."))
+    l2b_aside_status(TRUE, ready_fn(res))
+  }
+
+  output$aside_out <- renderUI({
+    active <- if (is.null(input$tool_tabs)) "design" else input$tool_tabs
+    if (identical(active, "design")) return(design_aside())
+    # the engine runs full-width (no right rail) -- its status lives in the hero stats
+    if (identical(active, "cryptic")) return(NULL)
+    status <- switch(active,
+      explorer = status_row(explorer_res(), explorer_err(), function(r)
+        sprintf("%d transcript(s) found at %s", length(r$transcripts), r$locus$label)),
+      extractor = status_row(extractor_seqs(), extractor_err(), function(r)
+        sprintf("%d exon(s) extracted", nrow(r$exons))),
+      plasmid = status_row(plasmid_res(), plasmid_err(), function(r)
+        sprintf("%s bp plasmid assembled (%d parts)", format(r$total_length, big.mark = ","), nrow(r$features))),
+      pcr = status_row(pcr_res(), pcr_err(), function(r)
+        sprintf("Master mix for %d reaction(s) ready", r$num_reactions)),
+      qpcr = status_row(qpcr_res(), qpcr_err(), function(r)
+        sprintf("%d sample(s) analyzed vs. %s", nrow(r$samples), r$calibrator)),
+      dens = status_row(dens_res(), dens_err(), function(r)
+        sprintf("%d lane(s) analyzed vs. %s", nrow(r$lanes), r$reference)),
+      sc = status_row(sc_res(), sc_err(), function(r)
+        sprintf("Curve fit, R² = %.3f", r$r_squared)),
+      norm = status_row(norm_res(), norm_err(), function(r)
+        sprintf("%d lane(s) planned", nrow(r$lanes))),
+      a280 = status_row(a280_res(), a280_err(), function(r)
+        sprintf("%d sample(s) quantified", nrow(r$samples))),
+      pp = status_row(pp_res(), pp_err(), function(r)
+        sprintf("%d aa sequence analyzed", r$length_aa)),
+      dil = status_row(dil_res(), dil_err(), function(r)
+        sprintf("%d dilution(s) calculated", length(r))),
+      div(class = "l2b-aside-note", "No results yet.")
+    )
+    l2b_generic_aside(active, status)
+  })
+}
+
+shinyApp(ui, server)
