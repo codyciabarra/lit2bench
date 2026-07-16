@@ -142,6 +142,21 @@ L2B_CSS <- "
   .l2b-step-line.l2b-done { background:var(--l2b-success); }
   .l2b-step-item a { display:flex; align-items:center; gap:8px; color:inherit; text-decoration:none; cursor:pointer; }
 
+  /* ================= RESULT TABS =================
+     Segmented-pill idiom reused from .l2b-theme-toggle / .l2b-sashimi-toolbar
+     (see comment above the latter) rather than default Bootstrap underline
+     tabs, so a tabsetPanel(type='tabs') nested in a card reads as the same
+     quiet neutral control language as the rest of the chrome. */
+  .l2b-card .nav-tabs { display:inline-flex; background:var(--l2b-surface-2); border:1px solid var(--l2b-border);
+    border-radius:999px; padding:3px; gap:2px; margin-bottom:16px; border-bottom:none; }
+  .l2b-card .nav-tabs .nav-item { margin:0; }
+  .l2b-card .nav-tabs .nav-link { border:none; background:transparent; color:var(--l2b-text-muted);
+    font-size:13px; font-weight:600; padding:7px 16px; border-radius:999px; cursor:pointer; transition:all .12s; }
+  .l2b-card .nav-tabs .nav-link:hover { background:var(--l2b-surface-hover); color:var(--l2b-text); }
+  .l2b-card .nav-tabs .nav-link.active, .l2b-card .nav-tabs .nav-link.active:hover
+    { background:var(--l2b-accent); color:#fff; }
+  .l2b-card .tab-content { padding-top:2px; }
+
   /* ================= CARDS ================= */
   .l2b-card { background:var(--l2b-surface); border:1px solid var(--l2b-border); border-radius:16px;
     box-shadow:var(--l2b-shadow); padding:20px 22px; margin-bottom:18px; }
