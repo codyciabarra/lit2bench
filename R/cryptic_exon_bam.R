@@ -516,9 +516,30 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
 build_cryptic_result <- function(locus, control_track, kd_track, transcripts, candidates) {
   primary <- NULL; n_other <- 0L
   if (length(transcripts) > 0) {
-    lens <- vapply(transcripts, function(tx) sum(tx$length), numeric(1))
-    primary <- transcripts[[which.max(lens)]]
-    n_other <- length(transcripts) - 1L
+    # Prefer transcripts belonging to the gene actually requested. The window
+    # can (and in gene-dense regions does) overlap neighboring genes' transcripts
+    # too, and picking purely by total exon length with no gene filter can
+    # silently return a different gene's structure entirely -- e.g. "POLG"
+    # resolving to FANCI, which overlaps the same window and has more total
+    # exonic length. A raw chr:start-end locus has no single "expected" gene
+    # (parse_locus_input() deliberately skips symbol resolution for those), so
+    # this only narrows when locus$label looks like a gene symbol and at least
+    # one transcript in the window actually matches it; otherwise it falls
+    # back to the old "longest in the whole window" behavior.
+    pool <- transcripts
+    if (!grepl(.LOCUS_RE, locus$label, ignore.case = TRUE)) {
+      matches <- vapply(transcripts, function(tx) identical(toupper(tx$gene_symbol[1]), toupper(locus$label)), logical(1))
+      if (any(matches)) pool <- transcripts[matches]
+    }
+    # Prefer the RefSeq Select / MANE Select transcript when one's flagged in
+    # the pool -- "longest total exon length" is only a fallback guess, and a
+    # gene's canonical/most-cited isoform isn't always the longest one (e.g.
+    # DNM1L's Select transcript has fewer exons than its longest isoform).
+    is_select <- vapply(pool, function(tx) isTRUE(tx$select[1]), logical(1))
+    select_pool <- if (any(is_select)) pool[is_select] else pool
+    lens <- vapply(select_pool, function(tx) sum(tx$length), numeric(1))
+    primary <- select_pool[[which.max(lens)]]
+    n_other <- length(pool) - 1L
   }
   list(chrom = locus$chrom, start = locus$start, end = locus$end, label = locus$label,
        control = control_track, knockdown = kd_track,

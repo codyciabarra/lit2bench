@@ -307,9 +307,16 @@ lookup_exon_table <- function(transcript, chrom, window_start, window_end, assem
   ends <- as.integer(strsplit(gsub("[^0-9,]", "", ends_raw), ",")[[1]])
   # UCSC track data is 0-based half-open; convert to 1-based inclusive
   starts <- starts + 1
+  strand <- get_field("strand")
+
+  # exon 1 is the first exon transcribed (5' end) -- on a minus-strand
+  # transcript that's the highest genomic coordinate, so numbering runs in
+  # reverse relative to starts/ends (always ascending genomic order). Same
+  # convention as lookup_transcripts_in_region().
+  exon_num <- if (!is.na(strand) && identical(strand, "-")) rev(seq_along(starts)) else seq_along(starts)
 
   data.frame(
-    exon_number = seq_along(starts),
+    exon_number = exon_num,
     start = starts, end = ends, length = ends - starts + 1
   )
 }
@@ -376,8 +383,14 @@ lookup_transcripts_in_region <- function(chrom, window_start, window_end, assemb
     cds_start <- if (coding) cds_start_raw + 1L else NA_integer_
     cds_end <- if (coding) cds_end_raw else NA_integer_
 
+    # exon 1 is always the first exon transcribed (the transcript's 5' end),
+    # matching RefSeq/NCBI/IGV convention -- on a minus-strand transcript that
+    # is the *highest* genomic coordinate, so numbering must run in reverse
+    # relative to starts/ends (which UCSC always returns in ascending genomic
+    # order regardless of strand).
+    exon_num <- if (identical(strand, "-")) rev(seq_along(starts)) else seq_along(starts)
     transcripts[[name]] <- data.frame(
-      exon_number = seq_along(starts), start = starts, end = ends,
+      exon_number = exon_num, start = starts, end = ends,
       length = ends - starts + 1, strand = if (is.na(strand)) NA_character_ else strand,
       name = name, chrom = chrom,
       gene_symbol = if (is.na(gene_symbol)) NA_character_ else gene_symbol,
@@ -388,7 +401,33 @@ lookup_transcripts_in_region <- function(chrom, window_start, window_end, assemb
   if (length(transcripts) == 0) {
     stop(sprintf("Found transcript records but couldn't parse exon boundaries for %s:%d-%d.", chrom, window_start, window_end))
   }
+
+  # Flag which accession(s) are the RefSeq Select / MANE Select pick per gene --
+  # "longest total exon length" (the fallback a caller uses when this is empty)
+  # is a guess and can differ from the transcript a genome browser shows by
+  # default. Best-effort and non-fatal: a failed/empty lookup just means every
+  # transcript gets select = FALSE, same as before this existed.
+  select_names <- tryCatch(.refseq_select_names(chrom, window_start, window_end, assembly, timeout_s),
+                            error = function(e) character(0))
+  for (nm in names(transcripts)) {
+    transcripts[[nm]]$select <- sub("\\..*$", "", nm) %in% sub("\\..*$", "", select_names)
+  }
   transcripts
+}
+
+#' Accession names (version-stripped) in UCSC's ncbiRefSeqSelect track for a
+#' window -- one per gene, the RefSeq Select / MANE Select canonical pick.
+.refseq_select_names <- function(chrom, window_start, window_end, assembly = "hg38", timeout_s = 30) {
+  url <- sprintf("https://api.genome.ucsc.edu/getData/track?genome=%s;track=ncbiRefSeqSelect;chrom=%s;start=%d;end=%d",
+                 assembly, chrom, window_start - 1, window_end)
+  con <- url(url)
+  on.exit(try(close(con), silent = TRUE))
+  old_timeout <- getOption("timeout"); options(timeout = timeout_s)
+  on.exit(options(timeout = old_timeout), add = TRUE)
+  txt <- paste(readLines(con, warn = FALSE), collapse = "")
+  recs <- regmatches(txt, gregexpr('\\{[^{}]*\\}', txt))[[1]]
+  recs <- recs[grepl('"name"\\s*:\\s*"', recs)]
+  vapply(recs, function(r) sub('.*"name"\\s*:\\s*"([^"]*)".*', "\\1", r), character(1), USE.NAMES = FALSE)
 }
 
 # --------------------------------------------------------------------------
