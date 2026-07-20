@@ -341,10 +341,12 @@ build_sashimi_html <- function(result, dark = FALSE) {
 
   nj <- result$candidates$novel_junctions
   nj_rows <- if (nrow(nj) > 0) paste(vapply(seq_len(nrow(nj)), function(i) sprintf(
-    '<tr><td class="mono">%s:%s-%s</td><td class="b">%d</td><td>%d</td></tr>',
+    '<tr><td class="mono">%s:%s-%s</td><td class="b">%d</td><td>%d</td><td>%s</td><td>%s</td></tr>',
     result$chrom, format(nj$start[i], big.mark = ","), format(nj$end[i], big.mark = ","),
-    nj$kd_reads[i], nj$control_reads[i]), character(1)), collapse = "") else
-    '<tr><td colspan="3" class="none">None found at the current thresholds.</td></tr>'
+    nj$kd_reads[i], nj$control_reads[i],
+    if (is.infinite(nj$fold_enrichment[i])) "&infin;" else sprintf("%.1f&times;", nj$fold_enrichment[i]),
+    if (isTRUE(nj$paired[i])) "Exon insertion" else "Single splice-site shift"), character(1)), collapse = "") else
+    '<tr><td colspan="5" class="none">None found at the current thresholds.</td></tr>'
 
   ce <- result$candidates$candidate_exons
   ce_rows <- if (nrow(ce) > 0) paste(vapply(seq_len(nrow(ce)), function(i) sprintf(
@@ -394,7 +396,7 @@ build_sashimi_html <- function(result, dark = FALSE) {
   <div class="fig">%s</div>
 
   <h2>Candidate novel splice junctions (knockdown, not in reference annotation)</h2>
-  <table><thead><tr><th>Junction</th><th>KD reads</th><th>Control reads</th></tr></thead>
+  <table><thead><tr><th>Junction</th><th>KD reads</th><th>Control reads</th><th>Fold</th><th>Shape</th></tr></thead>
     <tbody>%s</tbody></table>
 
   <h2>Candidate cryptic-exon spans (paired novel junctions bracketing a plausible exon)</h2>

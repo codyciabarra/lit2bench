@@ -578,7 +578,12 @@ cached_genomic_seq <- function(cache, chrom, start, end, assembly = "hg38") {
 #'        even when it already has meaningful baseline usage in control.
 #' @return list(novel_junctions, candidate_exons) -- two data.frames, each
 #'   carrying `confidence` ("high"/"medium"/"low") alongside the coordinate/
-#'   read-support columns callers already relied on.
+#'   read-support columns callers already relied on. novel_junctions also
+#'   carries `fold_enrichment` (kd_reads/control_reads, Inf if control-absent)
+#'   and `paired` (TRUE if this junction is one half of a candidate_exons row)
+#'   -- a real but unpaired junction (`paired == FALSE`) is very often a
+#'   single shifted/strengthened splice site rather than a whole new exon,
+#'   and should be surfaced as its own hit, not just read as "not found".
 #'   novel_junctions: individual KD junctions absent from annotation, control-quiet
 #'     (or control-quiet-relative-to-KD, see point 1 above).
 #'   candidate_exons: pairs of novel junctions that share one flanking annotated/
@@ -638,6 +643,14 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   kd$confidence <- ifelse(kd$anchored & (is.na(kd$motif_canonical) | kd$motif_canonical), "high",
                     ifelse(kd$anchored, "medium",
                     ifelse(isTRUE(kd$motif_canonical), "medium", "low")))
+  # How many times more this junction is used in KD than control -- the
+  # magnitude signal, independent of confidence (which is about whether the
+  # site looks like real splicing at all, not how big the change is). Most
+  # real TDP-43-altered splicing is a single shifted/strengthened splice site,
+  # not a two-junction exon insertion (see candidate_exons below) -- fold
+  # enrichment is what makes those visible as a real hit on their own,
+  # instead of reading as just another row in a long junction list.
+  kd$fold_enrichment <- ifelse(kd$control_reads > 0, kd$reads / kd$control_reads, Inf)
 
   control_ok <- kd$control_reads <= max_control_reads |
     (kd$control_reads > 0 & kd$reads >= kd$control_reads * min_fold_enrichment)
@@ -645,9 +658,10 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
     ifelse(kd$anchored, kd$reads >= min_kd_reads, kd$reads >= min_kd_reads * unanchored_read_mult)
 
   novel <- kd[passes, ]
-  novel <- novel[order(factor(novel$confidence, levels = c("high", "medium", "low")), -novel$reads),
-                 c("start", "end", "reads", "control_reads", "anchor_donor", "anchor_acceptor",
-                   "motif_class", "motif_canonical", "confidence")]
+  novel <- novel[order(factor(novel$confidence, levels = c("high", "medium", "low")),
+                       -novel$fold_enrichment, -novel$reads),
+                 c("start", "end", "reads", "control_reads", "fold_enrichment", "anchor_donor",
+                   "anchor_acceptor", "motif_class", "motif_canonical", "confidence")]
   names(novel)[names(novel) == "reads"] <- "kd_reads"
   rownames(novel) <- NULL
 
@@ -656,6 +670,7 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   # moved inside the intron) and novel junctions that keep ITS end
   # (acceptor-preserving, donor moved inside the intron), and pair those
   # -- never a junction anchored to a *different* intron entirely.
+  paired_keys <- character(0)
   spans <- list()
   if (nrow(novel) >= 1 && nrow(brackets) > 0) {
     for (b in seq_len(nrow(brackets))) {
@@ -668,6 +683,8 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
           if (left$end[i] >= right$start[j]) next  # must still be in donor->acceptor order
           gap_len <- right$start[j] - left$end[i] - 1
           if (gap_len < exon_len_range[1] || gap_len > exon_len_range[2]) next
+          paired_keys <- c(paired_keys, sprintf("%d-%d", left$start[i], left$end[i]),
+                                          sprintf("%d-%d", right$start[j], right$end[j]))
           conf <- if (identical(left$confidence[i], "high") && identical(right$confidence[j], "high")) "high" else "medium"
           spans[[length(spans) + 1]] <- data.frame(
             start = left$end[i] + 1, end = right$start[j] - 1, length = gap_len,
@@ -693,6 +710,8 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
         if (gap_len < exon_len_range[1] || gap_len > exon_len_range[2]) next
         min_reads <- min(ord$kd_reads[i], ord$kd_reads[j])
         if (min_reads < min_kd_reads * unanchored_read_mult) next
+        paired_keys <- c(paired_keys, sprintf("%d-%d", ord$start[i], ord$end[i]),
+                                        sprintf("%d-%d", ord$start[j], ord$end[j]))
         spans[[length(spans) + 1]] <- data.frame(
           start = gap_start, end = gap_end, length = gap_len,
           kd_reads = min_reads, control_reads = max(ord$control_reads[i], ord$control_reads[j]),
@@ -700,6 +719,12 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
       }
     }
   }
+  # A junction that never paired into a candidate_exon is likely a single
+  # shifted/strengthened splice site rather than a new-exon insertion (see
+  # header comment) -- flagged explicitly rather than left to be inferred
+  # from its absence in candidate_exons, so the UI can surface it as its own
+  # kind of hit instead of just another row in a long junction list.
+  novel$paired <- .junction_key(novel) %in% unique(paired_keys)
 
   candidate_exons <- if (length(spans) > 0) do.call(rbind, spans) else
     data.frame(start = integer(0), end = integer(0), length = integer(0),
@@ -712,6 +737,92 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   rownames(candidate_exons) <- NULL
 
   list(novel_junctions = novel, candidate_exons = candidate_exons)
+}
+
+# --------------------------------------------------------------------------
+# 4b. Intron retention -- a third splicing signature that junction-counting
+# cannot see at all: a retained intron is *unspliced*, so its reads never
+# produce a spliced CIGAR and never show up in summarizeJunctions() no
+# matter how novel or KD-elevated the region is. Found this gap by actually
+# running the junction-based detector against real verified cryptic exons:
+# GALC's is a retained intron (near-zero coverage in control, a real,
+# specific increase in knockdown), and it was invisible to
+# detect_cryptic_candidates() at any threshold because there was never a
+# junction to threshold.
+#
+# Reuses the coverage bins already computed for the sashimi figure (no new
+# BAM reads) -- for each annotated intron, maps its genomic span onto the
+# existing bin array, averages, and normalizes by each sample's own total
+# read count (a reads-per-million-style depth correction, since control and
+# knockdown libraries are rarely sequenced to identical depth) before
+# comparing.
+# --------------------------------------------------------------------------
+
+#' @param control_coverage,kd_coverage the binned coverage vectors from
+#'        bam_track_data_multi() (as used for the sashimi figure).
+#' @param win_start,win_end the genomic window those vectors span (locus$start/end).
+#' @param known_junc data.frame(start,end) of annotated introns.
+#' @param control_n_reads,kd_n_reads total reads in the window per condition,
+#'        for depth normalization.
+#' @param min_fold how many times higher the knockdown's depth-normalized
+#'        intron coverage must be than control's to flag retention.
+#' @return data.frame(start,end,length,control_cov,kd_cov,fold,confidence),
+#'   sorted by fold descending (Inf first).
+detect_intron_retention <- function(control_coverage, kd_coverage, win_start, win_end, known_junc,
+                                     control_n_reads, kd_n_reads, n_bins = length(control_coverage),
+                                     min_intron_len = 30, max_intron_len = 20000,
+                                     min_fold = 3, min_kd_norm_cov = 0.05) {
+  empty <- data.frame(start = integer(0), end = integer(0), length = integer(0),
+                       control_cov = numeric(0), kd_cov = numeric(0), fold = numeric(0),
+                       confidence = character(0))
+  if (nrow(known_junc) == 0 || is.null(control_n_reads) || is.null(kd_n_reads) ||
+      control_n_reads == 0 || kd_n_reads == 0 || n_bins == 0) return(empty)
+
+  introns <- unique(known_junc)
+  ilen <- introns$end - introns$start + 1
+  introns <- introns[ilen >= min_intron_len & ilen <= max_intron_len, , drop = FALSE]
+  if (nrow(introns) == 0) return(empty)
+
+  n <- win_end - win_start + 1
+  bin_typical <- function(cov, s, e) {
+    off_s <- max(1, s - win_start + 1); off_e <- min(n, e - win_start + 1)
+    if (off_s > off_e) return(NA_real_)
+    b_lo <- min(n_bins, max(1, ceiling(off_s / n * n_bins)))
+    b_hi <- min(n_bins, max(1, ceiling(off_e / n * n_bins)))
+    if (b_lo > b_hi) b_hi <- b_lo
+    # Trim the outermost bin on each end when there's room to: the boundary
+    # bin often straddles the intron/exon transition and picks up a slice of
+    # the neighboring exon's real (much higher) coverage, which -- averaged
+    # over what's usually a sparse intronic signal -- would otherwise swamp
+    # the whole estimate. Median (not mean) over what's left for the same
+    # reason: robust to any one remaining bin still catching a boundary read.
+    if (b_hi - b_lo >= 4) { b_lo <- b_lo + 1; b_hi <- b_hi - 1 }
+    stats::median(cov[b_lo:b_hi])
+  }
+
+  rows <- lapply(seq_len(nrow(introns)), function(i) {
+    s <- introns$start[i]; e <- introns$end[i]
+    cc <- bin_typical(control_coverage, s, e); kc <- bin_typical(kd_coverage, s, e)
+    if (is.na(cc) || is.na(kc)) return(NULL)
+    data.frame(start = s, end = e, length = e - s + 1,
+               control_cov = round(cc, 2), kd_cov = round(kc, 2), stringsAsFactors = FALSE)
+  })
+  rows <- rows[!vapply(rows, is.null, logical(1))]
+  if (length(rows) == 0) return(empty)
+  out <- do.call(rbind, rows)
+
+  ctrl_norm <- out$control_cov / control_n_reads * 1e6
+  kd_norm <- out$kd_cov / kd_n_reads * 1e6
+  out$fold <- ifelse(ctrl_norm > 0, kd_norm / ctrl_norm, ifelse(kd_norm > 0, Inf, 0))
+
+  keep <- kd_norm >= min_kd_norm_cov & (out$fold >= min_fold | is.infinite(out$fold))
+  out <- out[keep, , drop = FALSE]
+  if (nrow(out) == 0) return(empty)
+
+  out$confidence <- ifelse(is.infinite(out$fold) | out$fold >= min_fold * 2, "high", "medium")
+  out <- out[order(-ifelse(is.infinite(out$fold), .Machine$double.xmax, out$fold)), ]
+  rownames(out) <- NULL
+  out
 }
 
 # --------------------------------------------------------------------------
@@ -791,9 +902,13 @@ run_cryptic_detection <- function(locus, control_bams, kd_bams, assembly, thresh
     exon_len_range = c(thresholds$exon_min, thresholds$exon_max),
     window_seq = window_seq, window_seq_start = locus$start)
   diff_tbl <- differential_splicing_table(control_track$per_replicate, kd_track$per_replicate, known_junc)
+  retained_introns <- detect_intron_retention(
+    control_track$coverage, kd_track$coverage, locus$start, locus$end, known_junc,
+    control_n_reads = control_track$n_reads, kd_n_reads = kd_track$n_reads)
 
   res <- build_cryptic_result(locus, control_track, kd_track, transcripts, candidates)
   res$differential <- diff_tbl
+  res$retained_introns <- retained_introns
   res$thresholds <- thresholds
   res
 }

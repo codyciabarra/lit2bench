@@ -37,15 +37,26 @@ summarize_cryptic_findings <- function(result) {
 
   nj <- result$candidates$novel_junctions
   nj_txt <- if (nrow(nj) > 0) paste(sprintf(
-    "  - %s:%s-%s : %d knockdown reads, %d control reads [%s confidence]",
+    "  - %s:%s-%s : %d knockdown reads, %d control reads, %s fold [%s confidence, %s]",
     result$chrom, format(nj$start, big.mark = ","), format(nj$end, big.mark = ","),
-    nj$kd_reads, nj$control_reads, nj$confidence), collapse = "\n") else "  - none at the thresholds used"
+    nj$kd_reads, nj$control_reads,
+    ifelse(is.infinite(nj$fold_enrichment), "inf", sprintf("%.1fx", nj$fold_enrichment)),
+    nj$confidence, ifelse(nj$paired, "part of a candidate exon", "single splice-site shift")),
+    collapse = "\n") else "  - none at the thresholds used"
 
   ce <- result$candidates$candidate_exons
   ce_txt <- if (nrow(ce) > 0) paste(sprintf(
     "  - %s:%s-%s : %d bp, %d knockdown reads, %d control reads [%s confidence]",
     result$chrom, format(ce$start, big.mark = ","), format(ce$end, big.mark = ","),
     ce$length, ce$kd_reads, ce$control_reads, ce$confidence), collapse = "\n") else "  - none at the thresholds used"
+
+  ri <- result$retained_introns
+  ri_txt <- if (!is.null(ri) && nrow(ri) > 0) paste(sprintf(
+    "  - %s:%s-%s : %d bp, control cov=%.1f, knockdown cov=%.1f, %s fold [%s confidence]",
+    result$chrom, format(ri$start, big.mark = ","), format(ri$end, big.mark = ","),
+    ri$length, ri$control_cov, ri$kd_cov,
+    ifelse(is.infinite(ri$fold), "inf", sprintf("%.1fx", ri$fold)), ri$confidence),
+    collapse = "\n") else "  - none at the thresholds used"
 
   thr <- result$thresholds
   thr_txt <- if (!is.null(thr)) sprintf(
@@ -75,6 +86,8 @@ summarize_cryptic_findings <- function(result) {
     nj_txt, "\n",
     "Candidate cryptic-exon spans (two novel junctions bracketing a plausibly exon-sized gap):\n",
     ce_txt, "\n",
+    "Retained introns (elevated, depth-normalized coverage across an annotated intron in knockdown vs. control -- a different signature from the two above: it never produces a spliced junction, so it can show a real splicing change that the junction-based lists above cannot. TDP-43 loss causes widespread intron retention, so several appearing here is expected and not each necessarily its own distinct cryptic-exon event):\n",
+    ri_txt, "\n",
     sprintf("Detection thresholds used: %s\n", thr_txt),
     "Confidence tiers: \"high\" = the junction shares its donor or acceptor coordinate with an annotated/heavily-used splice site AND has a canonical (or unknown) splice motif; \"medium\" = anchored but non-canonical motif, or unanchored but canonical motif; \"low\" = shares neither endpoint with anything known/major -- treat low-confidence calls as needing manual verification (e.g. Sanger/RT-PCR), not as established.\n",
     "Differential splicing (top junctions by FDR-adjusted q-value; PSI = share of reads at that junction's donor/acceptor site; V1 method, a Fisher's exact test per junction, not a full replicate-variance model):\n",

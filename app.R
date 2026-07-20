@@ -1042,6 +1042,7 @@ server <- function(input, output, session) {
       l2b_empty("\U0001f52c", "No scan yet", "Enter a locus, upload both BAMs, and click Run detection.")))
     r <- cryptic_res()
     n_nj <- nrow(r$candidates$novel_junctions); n_ce <- nrow(r$candidates$candidate_exons)
+    n_ri <- nrow(r$retained_introns)
     gene_lbl <- if (!is.null(r$transcript)) r$transcript$name[1] else "—"
     max_j_reads <- max(1, r$control$junctions$reads, r$knockdown$junctions$reads)
     tagList(
@@ -1092,6 +1093,13 @@ server <- function(input, output, session) {
             DTOutput("cryptic_exon_tbl"),
             p(class = "l2b-card-sub", "Select a span row above, then jump straight to the Primer Designer — no manual coordinate entry."),
             actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;")
+          ),
+          tabPanel(sprintf("Retained introns (%d)", n_ri),
+            br(),
+            p(class = "l2b-card-sub",
+              "An intron that's spliced out less efficiently in knockdown -- reads pile up across the whole intron instead of being removed. This is a different signature from the two tabs above: it never produces a spliced junction at all, so junction-based detection can't see it no matter the threshold. TDP-43 loss causes widespread intron retention, so seeing several here is expected, not necessarily each one being its own distinct cryptic-exon event."),
+            DTOutput("cryptic_retention_tbl"),
+            div(style = "margin-top:10px;", downloadButton("cryptic_download_retention_csv", "Download retained introns (CSV)", class = "btn-dl"))
           ),
           tabPanel(sprintf("Differential splicing (%d)", nrow(r$differential)),
             br(),
@@ -1147,6 +1155,8 @@ server <- function(input, output, session) {
     out <- data.frame(
       Junction = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
       `KD reads` = df$kd_reads, `Control reads` = df$control_reads,
+      Fold = ifelse(is.infinite(df$fold_enrichment), "∞", sprintf("%.1f×", df$fold_enrichment)),
+      Shape = ifelse(df$paired, "Exon insertion", "Single splice-site shift"),
       Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)
@@ -1159,6 +1169,20 @@ server <- function(input, output, session) {
       Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)
+  output$cryptic_retention_tbl <- renderDT({
+    req(cryptic_res()); df <- cryptic_res()$retained_introns
+    if (is.null(df) || nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
+    out <- data.frame(
+      Intron = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
+      `Length (bp)` = df$length,
+      `Control cov.` = df$control_cov, `KD cov.` = df$kd_cov,
+      Fold = ifelse(is.infinite(df$fold), "∞", sprintf("%.1f×", df$fold)),
+      Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "none", options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  }, server = TRUE)
+  output$cryptic_download_retention_csv <- downloadHandler(
+    filename = function() sprintf("%s_retained_introns.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) write.csv(cryptic_res()$retained_introns, f, row.names = FALSE))
   output$cryptic_diff_tbl <- renderDT({
     req(cryptic_res()); df <- cryptic_res()$differential
     if (is.null(df) || nrow(df) == 0) return(l2b_result_table(data.frame(Message = "No junctions with enough pooled reads to test.")))
