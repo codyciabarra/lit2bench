@@ -537,11 +537,31 @@ cached_genomic_seq <- function(cache, chrom, start, end, assembly = "hg38") {
 #' switching artifact than genuine aberrant splicing, no matter how "novel" it
 #' looks against the annotation -- so it's held to a much higher read-count
 #' bar (`unanchored_read_mult`) instead of being treated the same as an
-#' anchored one. This is what makes detection work the same way on a locus
-#' nobody has hand-tuned thresholds for as it does on UNC13A/STMN2: lowering
-#' "Min KD reads" for a low-depth gene is safe because anchoring (and the
-#' splice-motif check) keeps noise out even at low read counts, exactly the
-#' way CSF calls remain reliable "even if supported by just a single EST".
+#' anchored one.
+#'
+#' Two things learned from real verified cryptic exons (TDP-43 knockdown
+#' data, e.g. POLG/GRIK2) that the first version of this got wrong -- both
+#' confirmed by actually running it against real BAMs, not just reasoning
+#' about the algorithm:
+#'
+#'  1. "Novel" cannot mean "zero/near-zero reads in control". A real cryptic
+#'     exon is *cryptic*, not absent, in normal cells -- CSF's own paper
+#'     describes exactly this (HBB's css used at ~1/703 in normal tissue).
+#'     At real sequencing depth that is dozens of control reads, not <= 1.
+#'     A flat `max_control_reads` cutoff throws these out. Fixed by ALSO
+#'     accepting a junction whose KD support is a large fold-enrichment over
+#'     its own control support (`min_fold_enrichment`), even when the
+#'     absolute control count is well above `max_control_reads`.
+#'  2. A pairing whose two junctions each anchor to *some* known/major
+#'     junction *anywhere in the gene* is not evidence of one cryptic exon --
+#'     in a many-exon gene (POLG has 22 introns) two unrelated, independently
+#'     anchored junctions will coincidentally land an exon-length apart by
+#'     chance. The real CSF signature (Fig. 1A) is a single shared intron
+#'     with two different minor endpoints INSIDE it: the same annotated (or
+#'     major-observed) intron's start reused by one junction and its end
+#'     reused by the other. Pairing is now done per-bracket (one shared
+#'     intron at a time), not by independently matching every novel junction
+#'     against the whole gene's anchor set.
 #'
 #' @param window_seq,window_seq_start optional: plus-strand reference sequence
 #'        for the locus (from cached_genomic_seq()) and its first genomic
@@ -552,17 +572,23 @@ cached_genomic_seq <- function(cache, chrom, start, end, assembly = "hg38") {
 #'        min_kd_reads to be reported at all -- higher bar, not exclusion,
 #'        since real but rare two-ended-novel events do happen (e.g. a fully
 #'        novel first exon, whose flanking sites are themselves unannotated).
+#' @param min_fold_enrichment a junction with control_reads > max_control_reads
+#'        is still accepted if kd_reads is at least this many times its own
+#'        control_reads -- lets a real, KD-massively-elevated site through
+#'        even when it already has meaningful baseline usage in control.
 #' @return list(novel_junctions, candidate_exons) -- two data.frames, each
 #'   carrying `confidence` ("high"/"medium"/"low") alongside the coordinate/
 #'   read-support columns callers already relied on.
-#'   novel_junctions: individual KD junctions absent from annotation, control-quiet.
-#'   candidate_exons: pairs of novel junctions bracketing a gap the size of a
-#'     plausible exon (exon_len_range bp) -- the actual "new exon" signature.
+#'   novel_junctions: individual KD junctions absent from annotation, control-quiet
+#'     (or control-quiet-relative-to-KD, see point 1 above).
+#'   candidate_exons: pairs of novel junctions that share one flanking annotated/
+#'     major intron between them (see point 2 above) and bracket a gap the size
+#'     of a plausible exon (exon_len_range bp) -- the actual "new exon" signature.
 detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                                        min_kd_reads = 3, max_control_reads = 1,
                                        exon_len_range = c(20, 400),
                                        window_seq = NULL, window_seq_start = NULL,
-                                       unanchored_read_mult = 3) {
+                                       unanchored_read_mult = 3, min_fold_enrichment = 5) {
   known_keys <- .junction_key(known_junc)
   known_starts <- unique(known_junc$start)
   known_ends <- unique(known_junc$end)
@@ -573,9 +599,10 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   # keeps detection working on genes with a lot of uncurated or tissue-
   # specific alternative splicing, not just genes whose structure matches
   # RefSeq exactly. Deliberately control-only, NOT control+KD: a candidate
-  # novel junction is already required to be control-quiet, so it can never
-  # anchor off its own read count this way -- pooling KD in here would let a
-  # sufficiently well-supported artifact "anchor" against itself.
+  # novel junction is already required to be control-quiet (or fold-enriched
+  # over its own control count), so it can never anchor off its own read
+  # count this way -- pooling KD in here would let a sufficiently
+  # well-supported artifact "anchor" against itself.
   major_min_reads <- max(5, min_kd_reads)
   major <- if (nrow(control_junc) > 0) {
     ctrl_agg <- stats::aggregate(reads ~ start + end, data = control_junc, sum)
@@ -583,6 +610,9 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   } else data.frame(start = integer(0), end = integer(0), reads = integer(0))
   anchor_starts <- union(known_starts, major$start)
   anchor_ends <- union(known_ends, major$end)
+  # the actual intron spans a pairing can bracket against (point 2 above):
+  # every annotated intron plus every major-observed one, deduplicated.
+  brackets <- unique(rbind(known_junc[, c("start", "end")], major[, c("start", "end")]))
 
   ctrl_keys <- .junction_key(control_junc)
   ctrl_reads_by_key <- stats::setNames(control_junc$reads, ctrl_keys)
@@ -609,7 +639,9 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                     ifelse(kd$anchored, "medium",
                     ifelse(isTRUE(kd$motif_canonical), "medium", "low")))
 
-  passes <- !kd$annotated & kd$control_reads <= max_control_reads &
+  control_ok <- kd$control_reads <= max_control_reads |
+    (kd$control_reads > 0 & kd$reads >= kd$control_reads * min_fold_enrichment)
+  passes <- !kd$annotated & control_ok &
     ifelse(kd$anchored, kd$reads >= min_kd_reads, kd$reads >= min_kd_reads * unanchored_read_mult)
 
   novel <- kd[passes, ]
@@ -619,44 +651,56 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   names(novel)[names(novel) == "reads"] <- "kd_reads"
   rownames(novel) <- NULL
 
+  # Per-bracket pairing: for each real intron (annotated or major-observed),
+  # find novel junctions that keep ITS start (donor-preserving, acceptor
+  # moved inside the intron) and novel junctions that keep ITS end
+  # (acceptor-preserving, donor moved inside the intron), and pair those
+  # -- never a junction anchored to a *different* intron entirely.
   spans <- list()
-  if (nrow(novel) >= 2) {
-    ord <- novel[order(novel$start), ]
-    for (i in seq_len(nrow(ord) - 1)) {
-      for (j in (i + 1):nrow(ord)) {
-        gap_start <- ord$end[i] + 1
-        gap_end <- ord$start[j] - 1
-        gap_len <- gap_end - gap_start + 1
-        if (gap_len < exon_len_range[1] || gap_len > exon_len_range[2]) next
-
-        # The real "cryptic exon inclusion" signature: the upstream junction
-        # keeps the real donor (its start anchors) and the downstream junction
-        # keeps the real acceptor (its end anchors) -- only the two INNER
-        # splice sites, immediately flanking the candidate exon, are novel.
-        # Pairing two junctions that are novel at BOTH ends is much weaker
-        # evidence (more likely two unrelated artifacts an exon-length apart),
-        # so it's kept as a "low" confidence tier under a stricter read bar
-        # rather than silently dropped -- CSF itself flags such calls for
-        # manual verification rather than excluding them outright.
-        donor_ok <- isTRUE(ord$anchor_donor[i])
-        acceptor_ok <- isTRUE(ord$anchor_acceptor[j])
-        min_reads <- min(ord$kd_reads[i], ord$kd_reads[j])
-        if (donor_ok && acceptor_ok) {
-          conf <- if (identical(ord$confidence[i], "high") && identical(ord$confidence[j], "high")) "high" else "medium"
-        } else if (donor_ok || acceptor_ok) {
-          if (min_reads < min_kd_reads * unanchored_read_mult) next
-          conf <- "medium"
-        } else {
-          if (min_reads < min_kd_reads * unanchored_read_mult) next
-          conf <- "low"
+  if (nrow(novel) >= 1 && nrow(brackets) > 0) {
+    for (b in seq_len(nrow(brackets))) {
+      a <- brackets$start[b]; z <- brackets$end[b]
+      left <- novel[novel$start == a & novel$end > a & novel$end < z, ]
+      right <- novel[novel$end == z & novel$start > a & novel$start < z, ]
+      if (nrow(left) == 0 || nrow(right) == 0) next
+      for (i in seq_len(nrow(left))) {
+        for (j in seq_len(nrow(right))) {
+          if (left$end[i] >= right$start[j]) next  # must still be in donor->acceptor order
+          gap_len <- right$start[j] - left$end[i] - 1
+          if (gap_len < exon_len_range[1] || gap_len > exon_len_range[2]) next
+          conf <- if (identical(left$confidence[i], "high") && identical(right$confidence[j], "high")) "high" else "medium"
+          spans[[length(spans) + 1]] <- data.frame(
+            start = left$end[i] + 1, end = right$start[j] - 1, length = gap_len,
+            kd_reads = min(left$kd_reads[i], right$kd_reads[j]),
+            control_reads = max(left$control_reads[i], right$control_reads[j]),
+            confidence = conf, stringsAsFactors = FALSE)
         }
-        spans[[length(spans) + 1]] <- data.frame(
-          start = gap_start, end = gap_end, length = gap_len,
-          kd_reads = min_reads, control_reads = max(ord$control_reads[i], ord$control_reads[j]),
-          confidence = conf, stringsAsFactors = FALSE)
       }
     }
   }
+  # Fallback tier: both junctions novel at BOTH ends (no shared bracket at
+  # all) -- much weaker evidence, kept under a stricter read bar rather than
+  # dropped outright, matching CSF's own caution that such calls need manual
+  # verification rather than being excluded.
+  if (nrow(novel) >= 2) {
+    ord <- novel[order(novel$start), ]
+    for (i in seq_len(nrow(ord) - 1)) {
+      if (isTRUE(ord$anchor_donor[i]) || isTRUE(ord$anchor_acceptor[i])) next
+      for (j in (i + 1):nrow(ord)) {
+        if (isTRUE(ord$anchor_donor[j]) || isTRUE(ord$anchor_acceptor[j])) next
+        gap_start <- ord$end[i] + 1; gap_end <- ord$start[j] - 1
+        gap_len <- gap_end - gap_start + 1
+        if (gap_len < exon_len_range[1] || gap_len > exon_len_range[2]) next
+        min_reads <- min(ord$kd_reads[i], ord$kd_reads[j])
+        if (min_reads < min_kd_reads * unanchored_read_mult) next
+        spans[[length(spans) + 1]] <- data.frame(
+          start = gap_start, end = gap_end, length = gap_len,
+          kd_reads = min_reads, control_reads = max(ord$control_reads[i], ord$control_reads[j]),
+          confidence = "low", stringsAsFactors = FALSE)
+      }
+    }
+  }
+
   candidate_exons <- if (length(spans) > 0) do.call(rbind, spans) else
     data.frame(start = integer(0), end = integer(0), length = integer(0),
                kd_reads = integer(0), control_reads = integer(0), confidence = character(0))
