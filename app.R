@@ -773,7 +773,7 @@ server <- function(input, output, session) {
     }
     sel <- input$cryptic_junc_tbl_rows_selected
     if (is.null(sel) || length(sel) == 0) { cryptic_err("Select a junction row first."); return(invisible()) }
-    df <- cryptic_res()$candidates$novel_junctions[sel, ]
+    df <- cryptic_junc_filtered()[sel, ]
     tx <- cryptic_res()$transcript
     run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
                         input$cryptic_assembly, df$start, df$end,
@@ -1084,6 +1084,9 @@ server <- function(input, output, session) {
         tabsetPanel(id = "cryptic_result_tabs", type = "tabs",
           tabPanel(sprintf("Novel junctions (%d)", n_nj),
             br(),
+            checkboxInput("cryptic_single_pair_only",
+                          "Localized to one exon pair only (hide junctions that skip a whole annotated exon)",
+                          value = FALSE),
             DTOutput("cryptic_junc_tbl"),
             p(class = "l2b-card-sub", "Select a junction row above, then jump straight to the Primer Designer — no manual coordinate entry."),
             actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;")
@@ -1149,14 +1152,28 @@ server <- function(input, output, session) {
       }
     )
   })
+  # Shared by the table render and the row-selection handoff below, so a
+  # selected row index always means the same junction in both places --
+  # filtering only the rendered `out` data.frame (not this) would leave the
+  # design-handoff observer indexing into the unfiltered set and silently
+  # handing off the wrong junction's coordinates once the filter is active.
+  cryptic_junc_filtered <- reactive({
+    req(cryptic_res())
+    df <- cryptic_res()$candidates$novel_junctions
+    if (isTRUE(input$cryptic_single_pair_only)) {
+      df <- df[!is.na(df$exons_skipped) & df$exons_skipped == 0, , drop = FALSE]
+    }
+    df
+  })
   output$cryptic_junc_tbl <- renderDT({
-    req(cryptic_res()); df <- cryptic_res()$candidates$novel_junctions
-    if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
+    df <- cryptic_junc_filtered()
+    if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds/filter.")))
     out <- data.frame(
       Junction = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
       `KD reads` = df$kd_reads, `Control reads` = df$control_reads,
       Fold = ifelse(is.infinite(df$fold_enrichment), "∞", sprintf("%.1f×", df$fold_enrichment)),
       Shape = ifelse(df$paired, "Exon insertion", "Single splice-site shift"),
+      `Exons skipped` = ifelse(is.na(df$exons_skipped), "—", df$exons_skipped),
       Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)

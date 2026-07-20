@@ -826,6 +826,36 @@ detect_intron_retention <- function(control_coverage, kd_coverage, win_start, wi
 }
 
 # --------------------------------------------------------------------------
+# 4c. How many whole annotated exons a junction jumps over -- the "is this
+# localized to one flanking exon pair, or does it skip clear across the
+# gene" question. A junction whose donor/acceptor land on real exon
+# boundaries but with zero whole exons in between is the classic
+# CSF/cryptic-exon pattern (an event *within* one intron, between two
+# consecutive annotated exons -- exactly the shape of every reference
+# example given: exon N to exon N+/-1, never N to N+/-3). A junction that
+# skips one or more entire annotated exons is a different, much less
+# specific signal (multi-exon skipping, or more often a spurious pairing/
+# misalignment), so it's worth being able to tell the two apart and filter
+# to just the former.
+# --------------------------------------------------------------------------
+
+#' @param df data.frame with $start, $end columns (novel_junctions or
+#'        candidate_exons) to annotate in place.
+#' @param exon_tbl data.frame(start,end) of one transcript's exons (e.g.
+#'        result$transcript from build_cryptic_result()), or NULL/empty to
+#'        skip (returns exons_skipped = NA -- never required to run).
+#' @return df with an added integer column `exons_skipped`: the count of
+#'         exon_tbl exons falling strictly inside (df$start, df$end) --
+#'         0 means the span never fully crosses an annotated exon.
+.annotate_exons_skipped <- function(df, exon_tbl) {
+  if (nrow(df) == 0) { df$exons_skipped <- integer(0); return(df) }
+  if (is.null(exon_tbl) || nrow(exon_tbl) == 0) { df$exons_skipped <- NA_integer_; return(df) }
+  df$exons_skipped <- vapply(seq_len(nrow(df)), function(i)
+    sum(exon_tbl$start > df$start[i] & exon_tbl$end < df$end[i]), integer(1))
+  df
+}
+
+# --------------------------------------------------------------------------
 # 5. Assemble everything sashimi_plot.R's build_sashimi_html() expects.
 # --------------------------------------------------------------------------
 
@@ -910,5 +940,14 @@ run_cryptic_detection <- function(locus, control_bams, kd_bams, assembly, thresh
   res$differential <- diff_tbl
   res$retained_introns <- retained_introns
   res$thresholds <- thresholds
+
+  # exons_skipped is computed against the SAME primary transcript
+  # build_cryptic_result() just picked (res$transcript) -- that's the one
+  # whose exon numbering matches what a user's own reference table (exon N
+  # to exon N+/-1) is written against, so this has to run after, not before,
+  # that selection.
+  exon_tbl <- if (!is.null(res$transcript)) res$transcript[, c("start", "end")] else NULL
+  res$candidates$novel_junctions <- .annotate_exons_skipped(res$candidates$novel_junctions, exon_tbl)
+  res$candidates$candidate_exons <- .annotate_exons_skipped(res$candidates$candidate_exons, exon_tbl)
   res
 }
