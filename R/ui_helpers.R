@@ -9,104 +9,146 @@ library(shiny)
 library(DT)
 
 L2B_CSS <- "
-  /* ================= THEME TOKENS ================= */
+  /* ================= THEME TOKENS =================
+     Dark is the primary treatment (glass panels floating over a soft
+     multi-color glow wash, in the spirit of visionOS/Apple-event pages) --
+     light gets the same materials with the glow toned down so it still
+     reads as glass on a bright ground rather than a smudge. */
   :root, :root[data-theme='dark'] {
-    --l2b-bg:#0a0d18; --l2b-bg-2:#0d1120;
+    --l2b-bg:#080a13; --l2b-bg-2:#0d1120;
     --l2b-surface:#12172a; --l2b-surface-2:#1a2036; --l2b-surface-hover:#212948;
+    --l2b-glass:rgba(23,28,48,.60); --l2b-glass-2:rgba(30,36,58,.55);
+    --l2b-glass-border:rgba(174,182,230,.14); --l2b-glass-highlight:rgba(255,255,255,.09);
     --l2b-border:#232a42; --l2b-border-strong:#323b5c;
     --l2b-text:#e9ecf5; --l2b-text-muted:#97a1bd; --l2b-text-faint:#626c8a;
-    --l2b-accent:#7c6cf0; --l2b-accent-hover:#6c5ce8; --l2b-accent-soft:rgba(124,108,240,.16);
-    --l2b-accent-text:#b9aeff;
+    --l2b-accent:#8f7dfa; --l2b-accent-2:#4f8cff; --l2b-accent-3:#2fd9c4;
+    --l2b-accent-hover:#a394ff; --l2b-accent-soft:rgba(143,125,250,.18);
+    --l2b-accent-text:#c2b6ff;
     --l2b-secondary:#f2a341; --l2b-secondary-soft:rgba(242,163,65,.14);
     --l2b-success:#2fbf71; --l2b-success-soft:rgba(47,191,113,.14);
     --l2b-danger:#f2555b; --l2b-danger-soft:rgba(242,85,91,.14);
-    --l2b-shadow:0 10px 32px rgba(0,0,0,.42);
+    --l2b-shadow:0 10px 34px rgba(0,0,0,.46);
+    --l2b-glow-1:rgba(143,125,250,.20); --l2b-glow-2:rgba(79,140,255,.14); --l2b-glow-3:rgba(47,217,196,.10);
     --l2b-scrollbar:#2b3352;
     color-scheme: dark;
   }
   :root[data-theme='light'] {
-    --l2b-bg:#eef1f7; --l2b-bg-2:#ffffff;
+    --l2b-bg:#eef0f8; --l2b-bg-2:#ffffff;
     --l2b-surface:#ffffff; --l2b-surface-2:#f3f5fb; --l2b-surface-hover:#e9edf9;
+    --l2b-glass:rgba(255,255,255,.68); --l2b-glass-2:rgba(255,255,255,.55);
+    --l2b-glass-border:rgba(70,80,140,.10); --l2b-glass-highlight:rgba(255,255,255,.85);
     --l2b-border:#e1e6f0; --l2b-border-strong:#c9d1e3;
     --l2b-text:#131a2c; --l2b-text-muted:#5c6580; --l2b-text-faint:#8b93ab;
-    --l2b-accent:#6355e0; --l2b-accent-hover:#5949cf; --l2b-accent-soft:rgba(99,85,224,.10);
-    --l2b-accent-text:#5949cf;
+    --l2b-accent:#6355e0; --l2b-accent-2:#2f6df0; --l2b-accent-3:#0fac96;
+    --l2b-accent-hover:#5949cf; --l2b-accent-soft:rgba(99,85,224,.11);
+    --l2b-accent-text:#5442d6;
     --l2b-secondary:#c9791a; --l2b-secondary-soft:rgba(201,121,26,.12);
     --l2b-success:#15915c; --l2b-success-soft:rgba(21,145,92,.12);
     --l2b-danger:#c0392b; --l2b-danger-soft:rgba(192,57,43,.10);
-    --l2b-shadow:0 4px 18px rgba(20,30,60,.08);
+    --l2b-shadow:0 4px 20px rgba(30,40,80,.09);
+    --l2b-glow-1:rgba(99,85,224,.10); --l2b-glow-2:rgba(47,109,240,.08); --l2b-glow-3:rgba(15,172,150,.07);
     --l2b-scrollbar:#d5dbe8;
     color-scheme: light;
   }
+  /* one shared gradient the accent-driven surfaces (buttons, active states,
+     the brand mark) all pull from, so 'modernize the palette' is one edit */
+  * { --l2b-accent-grad:linear-gradient(135deg, var(--l2b-accent), var(--l2b-accent-2) 62%, var(--l2b-accent-3)); }
 
   * { scrollbar-color: var(--l2b-scrollbar) transparent; }
   ::-webkit-scrollbar { width:10px; height:10px; }
   ::-webkit-scrollbar-thumb { background:var(--l2b-scrollbar); border-radius:8px; }
 
   html, body { background:var(--l2b-bg); }
-  body { color:var(--l2b-text); transition:background-color .15s, color .15s; }
+  body { color:var(--l2b-text); transition:background-color .2s, color .2s;
+    background-image:
+      radial-gradient(1100px 760px at 12% -8%, var(--l2b-glow-1), transparent 60%),
+      radial-gradient(950px 680px at 104% 6%, var(--l2b-glow-2), transparent 58%),
+      radial-gradient(900px 820px at 46% 118%, var(--l2b-glow-3), transparent 62%);
+    background-attachment:fixed; background-repeat:no-repeat; }
   a { color:var(--l2b-accent-text); }
 
   /* ================= TOPBAR ================= */
   .l2b-topbar { display:flex; align-items:center; gap:18px; padding:14px 4px 20px; }
   .l2b-brand { display:flex; align-items:center; gap:10px; flex:none; }
   .l2b-brand-mark { width:36px; height:36px; border-radius:11px; display:flex; align-items:center;
-    justify-content:center; font-size:18px; flex:none; color:#fff;
-    background:linear-gradient(145deg,var(--l2b-accent),#4a3fb0); box-shadow:0 4px 12px rgba(124,108,240,.35); }
+    justify-content:center; font-size:18px; flex:none; color:#fff; position:relative;
+    background:var(--l2b-accent-grad); box-shadow:0 4px 16px rgba(124,108,240,.4), inset 0 1px 0 rgba(255,255,255,.35); }
+  /* a faint mirrored reflection under the mark, fading out -- product-shot idiom */
+  .l2b-brand-mark::after { content:''; position:absolute; left:2px; right:2px; top:100%; height:14px;
+    margin-top:2px; border-radius:0 0 8px 8px; background:var(--l2b-accent-grad);
+    opacity:.28; transform:scaleY(-1); -webkit-mask-image:linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
+            mask-image:linear-gradient(to bottom, rgba(0,0,0,.55), transparent); pointer-events:none; }
   .l2b-brand-text { font-size:19px; font-weight:800; letter-spacing:-.3px; color:var(--l2b-text); line-height:1.1; }
   .l2b-brand-sub { font-size:11.5px; color:var(--l2b-text-faint); margin-top:1px; }
 
   .l2b-search { flex:1 1 auto; max-width:460px; position:relative; }
-  .l2b-search input { width:100%; background:var(--l2b-surface); border:1px solid var(--l2b-border);
+  .l2b-search input { width:100%; background:var(--l2b-glass); backdrop-filter:blur(16px) saturate(160%);
+    -webkit-backdrop-filter:blur(16px) saturate(160%); border:1px solid var(--l2b-glass-border);
     color:var(--l2b-text); border-radius:11px; padding:9px 46px 9px 38px; font-size:14px; outline:none;
-    transition:border-color .12s, background .12s; }
+    box-shadow:inset 0 1px 0 var(--l2b-glass-highlight);
+    transition:border-color .15s, background .15s, box-shadow .15s; }
   .l2b-search input::placeholder { color:var(--l2b-text-faint); }
-  .l2b-search input:focus { border-color:var(--l2b-accent); background:var(--l2b-surface-2); }
+  .l2b-search input:focus { border-color:var(--l2b-accent); box-shadow:0 0 0 3px var(--l2b-accent-soft), inset 0 1px 0 var(--l2b-glass-highlight); }
   .l2b-search-icon { position:absolute; left:13px; top:50%; transform:translateY(-50%);
     color:var(--l2b-text-faint); font-size:13px; pointer-events:none; }
   .l2b-search-kbd { position:absolute; right:9px; top:50%; transform:translateY(-50%);
     font-size:10.5px; font-weight:700; color:var(--l2b-text-faint); background:var(--l2b-surface-2);
     border:1px solid var(--l2b-border); border-radius:5px; padding:2px 6px; pointer-events:none; }
 
-  .l2b-theme-toggle { display:flex; background:var(--l2b-surface-2); border:1px solid var(--l2b-border);
+  /* Segmented-pill idiom (theme toggle / sashimi toolbar / result tabs below)
+     shares one glass-with-a-hairline-sheen look and one gradient 'lit up'
+     active state -- the 'mirror' language asked for, applied consistently
+     rather than as a one-off effect. */
+  .l2b-theme-toggle { display:flex; background:var(--l2b-glass); backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px); border:1px solid var(--l2b-glass-border);
+    box-shadow:inset 0 1px 0 var(--l2b-glass-highlight);
     border-radius:999px; padding:3px; gap:2px; flex:none; }
   .l2b-theme-toggle button { border:none; background:transparent; width:30px; height:30px; border-radius:50%;
     display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--l2b-text-muted);
-    font-size:14px; transition:all .12s; }
-  .l2b-theme-toggle button.l2b-active { background:var(--l2b-accent); color:#fff; }
+    font-size:14px; transition:all .18s; }
+  .l2b-theme-toggle button.l2b-active { background:var(--l2b-accent-grad); color:#fff;
+    box-shadow:0 2px 10px rgba(124,108,240,.4), inset 0 1px 0 rgba(255,255,255,.4); }
 
   /* Sashimi plot's zoom/view-mode controls -- same segmented-pill idiom as
      .l2b-theme-toggle above (reused deliberately, not reinvented), so viewer
      chrome reads as one quiet neutral control instead of competing in
      .btn-run/.btn-dl's loud accent colors, which are reserved for actions
      that actually run something or produce a file. */
-  .l2b-sashimi-toolbar { display:inline-flex; align-items:center; background:var(--l2b-surface-2);
-    border:1px solid var(--l2b-border); border-radius:999px; padding:3px; gap:1px; flex:none; }
+  .l2b-sashimi-toolbar { display:inline-flex; align-items:center; background:var(--l2b-glass);
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border:1px solid var(--l2b-glass-border); box-shadow:inset 0 1px 0 var(--l2b-glass-highlight);
+    border-radius:999px; padding:3px; gap:1px; flex:none; }
   .l2b-sashimi-toolbar button { border:none; background:transparent; color:var(--l2b-text-muted);
     display:flex; align-items:center; justify-content:center; gap:5px; cursor:pointer;
     font-size:12.5px; font-weight:600; height:28px; padding:0 10px; border-radius:999px;
-    transition:background .12s, color .12s; white-space:nowrap; }
+    transition:background .15s, color .15s; white-space:nowrap; }
   .l2b-sashimi-toolbar button.l2b-icon-btn { width:28px; padding:0; font-size:13px; }
   .l2b-sashimi-toolbar button:hover { background:var(--l2b-surface-hover); color:var(--l2b-text); }
-  .l2b-sashimi-toolbar button.l2b-active { background:var(--l2b-accent); color:#fff; }
+  .l2b-sashimi-toolbar button.l2b-active { background:var(--l2b-accent-grad); color:#fff;
+    box-shadow:0 2px 10px rgba(124,108,240,.35), inset 0 1px 0 rgba(255,255,255,.4); }
   .l2b-sashimi-toolbar-sep { width:1px; height:18px; background:var(--l2b-border); margin:0 3px; flex:none; }
 
   /* ================= SIDEBAR NAV ================= */
-  .l2b-nav { background:var(--l2b-surface); border:1px solid var(--l2b-border); border-radius:16px;
-    padding:12px; box-shadow:var(--l2b-shadow); position:sticky; top:14px; }
+  .l2b-nav { background:var(--l2b-glass); backdrop-filter:blur(22px) saturate(160%);
+    -webkit-backdrop-filter:blur(22px) saturate(160%); border:1px solid var(--l2b-glass-border);
+    border-radius:16px; padding:12px; box-shadow:var(--l2b-shadow), inset 0 1px 0 var(--l2b-glass-highlight);
+    position:sticky; top:14px; }
   .l2b-nav-group { font-size:10.5px; font-weight:800; letter-spacing:.09em; text-transform:uppercase;
     color:var(--l2b-text-faint); padding:14px 12px 6px; }
   .l2b-nav-group:first-child { padding-top:6px; }
   .l2b-nav .btn { display:flex; align-items:center; gap:10px; width:100%; text-align:left;
     background:transparent; border:none; color:var(--l2b-text-muted); font-size:14px; font-weight:550;
-    padding:9px 12px; border-radius:10px; margin-bottom:2px; transition:all .12s; }
+    padding:9px 12px; border-radius:10px; margin-bottom:2px; transition:all .15s; }
   .l2b-nav .btn:hover { background:var(--l2b-surface-hover); color:var(--l2b-text); }
-  .l2b-nav .btn.active { background:var(--l2b-accent-soft); color:var(--l2b-accent-text); font-weight:700;
-    box-shadow:inset 3px 0 0 var(--l2b-accent); }
+  .l2b-nav .btn.active { background:linear-gradient(135deg, var(--l2b-accent-soft), rgba(79,140,255,.10));
+    color:var(--l2b-accent-text); font-weight:700;
+    box-shadow:inset 3px 0 0 var(--l2b-accent), inset 0 1px 0 var(--l2b-glass-highlight); }
 
   /* ================= RIGHT RAIL / ASIDE ================= */
-  .l2b-aside-card { background:var(--l2b-surface); border:1px solid var(--l2b-border); border-radius:16px;
-    padding:18px; margin-bottom:16px; box-shadow:var(--l2b-shadow); }
+  .l2b-aside-card { background:var(--l2b-glass); backdrop-filter:blur(22px) saturate(160%);
+    -webkit-backdrop-filter:blur(22px) saturate(160%); border:1px solid var(--l2b-glass-border);
+    border-radius:16px; padding:18px; margin-bottom:16px;
+    box-shadow:var(--l2b-shadow), inset 0 1px 0 var(--l2b-glass-highlight); }
   .l2b-aside-title { font-size:11px; font-weight:800; letter-spacing:.09em; text-transform:uppercase;
     color:var(--l2b-text-faint); margin:0 0 12px; }
   .l2b-aside-row { display:flex; align-items:flex-start; gap:9px; font-size:13.5px; color:var(--l2b-text);
@@ -115,8 +157,9 @@ L2B_CSS <- "
   .l2b-aside-link { display:flex; align-items:center; justify-content:space-between; width:100%;
     background:var(--l2b-surface-2); border:1px solid var(--l2b-border); color:var(--l2b-text);
     font-size:13.5px; font-weight:600; padding:10px 13px; border-radius:11px; margin-bottom:8px;
-    text-align:left; transition:all .12s; }
-  .l2b-aside-link:hover { background:var(--l2b-surface-hover); border-color:var(--l2b-border-strong); color:var(--l2b-text); }
+    text-align:left; transition:all .18s; }
+  .l2b-aside-link:hover { background:var(--l2b-surface-hover); border-color:var(--l2b-accent);
+    color:var(--l2b-text); transform:translateY(-1px); box-shadow:0 4px 14px rgba(124,108,240,.18); }
   .l2b-aside-link span.arrow { color:var(--l2b-text-faint); }
   .l2b-aside-note { font-size:12.5px; color:var(--l2b-text-muted); line-height:1.5; }
   .l2b-quality-item { display:flex; align-items:center; gap:8px; font-size:13px; padding:4px 0; }
@@ -133,7 +176,8 @@ L2B_CSS <- "
   .l2b-step-num { width:24px; height:24px; border-radius:50%; display:flex; align-items:center;
     justify-content:center; font-size:11.5px; font-weight:700; background:var(--l2b-surface-2);
     color:var(--l2b-text-muted); flex:none; border:1px solid var(--l2b-border); }
-  .l2b-step-item.l2b-active .l2b-step-num { background:var(--l2b-accent); color:#fff; border-color:var(--l2b-accent); }
+  .l2b-step-item.l2b-active .l2b-step-num { background:var(--l2b-accent-grad); color:#fff; border-color:var(--l2b-accent);
+    box-shadow:0 2px 8px rgba(124,108,240,.4); }
   .l2b-step-item.l2b-done .l2b-step-num { background:var(--l2b-success); color:#fff; border-color:var(--l2b-success); }
   .l2b-step-label { font-size:13px; font-weight:600; color:var(--l2b-text-faint); white-space:nowrap; }
   .l2b-step-item.l2b-active .l2b-step-label { color:var(--l2b-text); }
@@ -147,25 +191,32 @@ L2B_CSS <- "
      (see comment above the latter) rather than default Bootstrap underline
      tabs, so a tabsetPanel(type='tabs') nested in a card reads as the same
      quiet neutral control language as the rest of the chrome. */
-  .l2b-card .nav-tabs { display:inline-flex; background:var(--l2b-surface-2); border:1px solid var(--l2b-border);
+  .l2b-card .nav-tabs { display:inline-flex; background:var(--l2b-glass); backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px); border:1px solid var(--l2b-glass-border);
+    box-shadow:inset 0 1px 0 var(--l2b-glass-highlight);
     border-radius:999px; padding:3px; gap:2px; margin-bottom:16px; border-bottom:none; }
   .l2b-card .nav-tabs .nav-item { margin:0; }
   .l2b-card .nav-tabs .nav-link { border:none; background:transparent; color:var(--l2b-text-muted);
-    font-size:13px; font-weight:600; padding:7px 16px; border-radius:999px; cursor:pointer; transition:all .12s; }
+    font-size:13px; font-weight:600; padding:7px 16px; border-radius:999px; cursor:pointer; transition:all .18s; }
   .l2b-card .nav-tabs .nav-link:hover { background:var(--l2b-surface-hover); color:var(--l2b-text); }
   .l2b-card .nav-tabs .nav-link.active, .l2b-card .nav-tabs .nav-link.active:hover
-    { background:var(--l2b-accent); color:#fff; }
+    { background:var(--l2b-accent-grad); color:#fff; box-shadow:0 2px 8px rgba(124,108,240,.35); }
   .l2b-card .tab-content { padding-top:2px; }
 
-  /* ================= CARDS ================= */
-  .l2b-card { background:var(--l2b-surface); border:1px solid var(--l2b-border); border-radius:16px;
-    box-shadow:var(--l2b-shadow); padding:20px 22px; margin-bottom:18px; }
+  /* ================= CARDS =================
+     Glass material + a hairline top sheen (inset highlight) so the card
+     reads as a lit pane of glass, not a flat rectangle -- the layout/grid
+     is unchanged, only the material. */
+  .l2b-card { background:var(--l2b-glass); backdrop-filter:blur(22px) saturate(160%);
+    -webkit-backdrop-filter:blur(22px) saturate(160%); border:1px solid var(--l2b-glass-border);
+    border-radius:16px; box-shadow:var(--l2b-shadow), inset 0 1px 0 var(--l2b-glass-highlight);
+    padding:20px 22px; margin-bottom:18px; }
   .l2b-card-title { font-size:12px; font-weight:800; letter-spacing:.09em; text-transform:uppercase;
     color:var(--l2b-accent-text); margin:0 0 4px; display:flex; align-items:center; gap:8px; }
   .l2b-card-sub { color:var(--l2b-text-muted); font-size:13.5px; margin:0 0 16px; }
   .l2b-step { display:inline-flex; align-items:center; justify-content:center;
-    width:22px; height:22px; border-radius:50%; background:var(--l2b-accent); color:#fff;
-    font-size:12px; font-weight:700; flex:none; }
+    width:22px; height:22px; border-radius:50%; background:var(--l2b-accent-grad); color:#fff;
+    font-size:12px; font-weight:700; flex:none; box-shadow:0 2px 6px rgba(124,108,240,.35); }
 
   /* ================= HERO STATS ================= */
   .l2b-hero { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px; }
@@ -179,23 +230,43 @@ L2B_CSS <- "
   .l2b-stat-value { font-size:22px; font-weight:800; color:var(--l2b-text); line-height:1.15; }
   .l2b-stat-note { font-size:11.5px; color:var(--l2b-text-muted); margin-top:3px; }
 
-  /* ================= BUTTONS ================= */
-  .btn-run { background:var(--l2b-accent); border:none; color:#fff; font-weight:650; font-size:15px;
+  /* ================= BUTTONS =================
+     Gradient fill (the same --l2b-accent-grad the rest of the accent
+     surfaces use) + a diagonal light sheen that sweeps across on hover --
+     a glossy, 'moving reflection' idiom instead of a flat color swap.
+     Reduced-motion users get the color change without the sweep (below). */
+  .btn-run, .btn-dl, .btn-alt, .btn-ghost { position:relative; overflow:hidden; isolation:isolate; }
+  .btn-run::after, .btn-dl::after, .btn-alt::after, .btn-ghost::after {
+    content:''; position:absolute; inset:0 auto 0 -60%; width:45%;
+    background:linear-gradient(115deg, transparent, rgba(255,255,255,.4), transparent);
+    transform:skewX(-18deg); transition:left .55s cubic-bezier(.2,.8,.2,1); pointer-events:none; }
+  .btn-run:hover::after, .btn-dl:hover::after, .btn-alt:hover::after, .btn-ghost:hover::after { left:130%; }
+
+  .btn-run { background:var(--l2b-accent-grad); border:none; color:#fff; font-weight:650; font-size:15px;
     padding:11px 18px; border-radius:11px; width:100%;
-    box-shadow:0 2px 10px rgba(124,108,240,.35); transition:all .15s; }
-  .btn-run:hover { background:var(--l2b-accent-hover); color:#fff; transform:translateY(-1px); }
+    box-shadow:0 4px 16px rgba(124,108,240,.38), inset 0 1px 0 rgba(255,255,255,.3); transition:transform .15s, box-shadow .15s; }
+  .btn-run:hover { color:#fff; transform:translateY(-1px); box-shadow:0 6px 22px rgba(124,108,240,.48), inset 0 1px 0 rgba(255,255,255,.35); }
   .btn-row { background:var(--l2b-surface-2); border:1px solid var(--l2b-border-strong); color:var(--l2b-accent-text);
     font-weight:600; font-size:13px; padding:6px 12px; border-radius:9px; }
   .btn-row:hover { background:var(--l2b-surface-hover); color:var(--l2b-accent-text); }
-  .btn-dl { background:var(--l2b-success); border:none; color:#fff; font-weight:650; font-size:14.5px;
-    padding:10px 16px; border-radius:11px; width:100%; }
-  .btn-dl:hover { background:#249e5d; color:#fff; }
-  .btn-alt { background:var(--l2b-secondary); border:none; color:#171012; font-weight:650; font-size:14px;
-    padding:9px 14px; border-radius:10px; width:100%; }
-  .btn-alt:hover { background:#d99529; color:#171012; }
-  .btn-ghost { background:var(--l2b-surface-2); border:1px solid var(--l2b-border-strong); color:var(--l2b-text);
-    font-weight:600; font-size:14px; padding:9px 16px; border-radius:10px; }
+  .btn-dl { background:linear-gradient(135deg, var(--l2b-success), #1f9e6e 70%, var(--l2b-accent-3));
+    border:none; color:#fff; font-weight:650; font-size:14.5px;
+    padding:10px 16px; border-radius:11px; width:100%; box-shadow:0 4px 14px rgba(47,191,113,.3), inset 0 1px 0 rgba(255,255,255,.25);
+    transition:transform .15s, box-shadow .15s; }
+  .btn-dl:hover { color:#fff; transform:translateY(-1px); box-shadow:0 6px 20px rgba(47,191,113,.4), inset 0 1px 0 rgba(255,255,255,.3); }
+  .btn-alt { background:linear-gradient(135deg, var(--l2b-secondary), #d9932f); border:none; color:#171012; font-weight:650; font-size:14px;
+    padding:9px 14px; border-radius:10px; width:100%; box-shadow:0 3px 12px rgba(242,163,65,.28); transition:transform .15s, box-shadow .15s; }
+  .btn-alt:hover { color:#171012; transform:translateY(-1px); box-shadow:0 5px 16px rgba(242,163,65,.38); }
+  .btn-ghost { background:var(--l2b-glass); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    border:1px solid var(--l2b-border-strong); color:var(--l2b-text);
+    font-weight:600; font-size:14px; padding:9px 16px; border-radius:10px; transition:background .15s, color .15s; }
   .btn-ghost:hover { background:var(--l2b-surface-hover); color:var(--l2b-text); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .btn-run::after, .btn-dl::after, .btn-alt::after, .btn-ghost::after { display:none; }
+    .btn-run, .btn-dl, .btn-alt, .l2b-aside-link { transition:none !important; }
+    .btn-run:hover, .btn-dl:hover, .btn-alt:hover, .l2b-aside-link:hover { transform:none !important; }
+  }
 
   /* ================= MESSAGES ================= */
   .l2b-warn { background:var(--l2b-secondary-soft); border-left:4px solid var(--l2b-secondary); border-radius:9px;
@@ -213,7 +284,30 @@ L2B_CSS <- "
     box-shadow:0 0 0 3px var(--l2b-accent-soft) !important; background:var(--l2b-surface-2) !important; color:var(--l2b-text) !important; }
   .form-control::placeholder { color:var(--l2b-text-faint) !important; }
   label { font-weight:600 !important; font-size:13.5px !important; color:var(--l2b-text-muted) !important; }
-  input[type='radio'], input[type='checkbox'] { accent-color:var(--l2b-accent); }
+
+  /* Shiny's checkboxInput()/radioButtons() wrap a bare <input> in
+     .shiny-input-container .checkbox/.radio, and bslib's bundled Bootstrap
+     ships a compatibility rule at that exact selector (higher specificity
+     than a plain input[type=...] rule, since it's two classes deep) that
+     paints its own gray/dark box regardless of our --l2b-accent tokens --
+     accent-color alone can't win that fight. !important matches this file's
+     existing convention for the same problem (see .form-control above). */
+  input[type='radio'], input[type='checkbox'] { appearance:none !important; -webkit-appearance:none !important;
+    width:17px !important; height:17px !important; flex:none; margin:0 8px 0 0 !important; position:relative;
+    cursor:pointer; border:1.5px solid var(--l2b-border-strong) !important; background:var(--l2b-surface-2) !important;
+    transition:background .12s, border-color .12s; vertical-align:middle; top:-1px; }
+  input[type='radio'] { border-radius:50% !important; }
+  input[type='checkbox'] { border-radius:5px !important; }
+  input[type='radio']:hover, input[type='checkbox']:hover { border-color:var(--l2b-accent) !important; }
+  input[type='radio']:checked, input[type='checkbox']:checked
+    { background:var(--l2b-accent) !important; border-color:var(--l2b-accent) !important; }
+  input[type='radio']:checked::after { content:''; position:absolute; left:50%; top:50%;
+    width:7px; height:7px; border-radius:50%; background:#fff; transform:translate(-50%,-50%); }
+  input[type='checkbox']:checked::after { content:''; position:absolute; left:5px; top:1px;
+    width:4px; height:9px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg); }
+  input[type='radio']:focus-visible, input[type='checkbox']:focus-visible
+    { outline:none; box-shadow:0 0 0 3px var(--l2b-accent-soft); }
+  .radio label, .checkbox label, .form-check label { display:flex; align-items:center; cursor:pointer; }
   .form-check-label { color:var(--l2b-text) !important; }
   .selectize-dropdown, .selectize-dropdown-content { background:var(--l2b-surface) !important;
     color:var(--l2b-text) !important; border-color:var(--l2b-border-strong) !important; }
@@ -231,7 +325,11 @@ L2B_CSS <- "
   table.dataTable tbody tr { background:var(--l2b-surface) !important; }
   table.dataTable tbody tr:hover td { background:var(--l2b-surface-hover) !important; }
   table.dataTable.no-footer { border-bottom:1px solid var(--l2b-border) !important; }
-  .dataTables_wrapper { margin-bottom:0 !important; }
+  /* A wide column (e.g. Plasmid Creator's raw sequence text) would otherwise
+     overflow the card's fixed width with no way to see the rest of it --
+     scroll horizontally inside the table's own box instead. */
+  .dataTables_wrapper { margin-bottom:0 !important; overflow-x:auto; }
+  table.dataTable { white-space:nowrap; }
 
   iframe { color-scheme: normal; }
 
@@ -239,7 +337,7 @@ L2B_CSS <- "
   .l2b-shell { display:grid; grid-template-columns:210px minmax(0,1fr) 300px; gap:20px;
     align-items:start; padding:0 2px 44px; }
   .l2b-col-nav, .l2b-col-main, .l2b-col-aside { min-width:0; }
-  /* full-width tools (e.g. the Cryptic Exon Engine) drop the right rail so wide
+  /* full-width tools (e.g. the Cryptic Splicing Engine) drop the right rail so wide
      figures get the room they need */
   body[data-tool='cryptic'] .l2b-shell { grid-template-columns:210px minmax(0,1fr); }
   body[data-tool='cryptic'] .l2b-col-aside { display:none; }
@@ -301,7 +399,7 @@ L2B_JS <- "
     }
   });
   // the server tells us which tool is active so CSS can switch layout
-  // (e.g. full-width, no right rail, for the Cryptic Exon Engine)
+  // (e.g. full-width, no right rail, for the Cryptic Splicing Engine)
   if (window.Shiny && Shiny.addCustomMessageHandler) {
     Shiny.addCustomMessageHandler('l2bTool', function(t){
       document.body.setAttribute('data-tool', t);

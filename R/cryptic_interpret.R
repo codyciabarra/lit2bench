@@ -1,4 +1,4 @@
-# cryptic_interpret.R -- turn a Cryptic Exon Engine result into a plain-language
+# cryptic_interpret.R -- turn a Cryptic Splicing Engine result into a plain-language
 # interpretation using a LOCAL model (Ollama, via local_llm.R). This is the one
 # non-deterministic helper in the tool; it is kept on a tight leash:
 #
@@ -37,15 +37,15 @@ summarize_cryptic_findings <- function(result) {
 
   nj <- result$candidates$novel_junctions
   nj_txt <- if (nrow(nj) > 0) paste(sprintf(
-    "  - %s:%s-%s : %d knockdown reads, %d control reads",
+    "  - %s:%s-%s : %d knockdown reads, %d control reads [%s confidence]",
     result$chrom, format(nj$start, big.mark = ","), format(nj$end, big.mark = ","),
-    nj$kd_reads, nj$control_reads), collapse = "\n") else "  - none at the thresholds used"
+    nj$kd_reads, nj$control_reads, nj$confidence), collapse = "\n") else "  - none at the thresholds used"
 
   ce <- result$candidates$candidate_exons
   ce_txt <- if (nrow(ce) > 0) paste(sprintf(
-    "  - %s:%s-%s : %d bp, %d knockdown reads, %d control reads",
+    "  - %s:%s-%s : %d bp, %d knockdown reads, %d control reads [%s confidence]",
     result$chrom, format(ce$start, big.mark = ","), format(ce$end, big.mark = ","),
-    ce$length, ce$kd_reads, ce$control_reads), collapse = "\n") else "  - none at the thresholds used"
+    ce$length, ce$kd_reads, ce$control_reads, ce$confidence), collapse = "\n") else "  - none at the thresholds used"
 
   thr <- result$thresholds
   thr_txt <- if (!is.null(thr)) sprintf(
@@ -76,6 +76,7 @@ summarize_cryptic_findings <- function(result) {
     "Candidate cryptic-exon spans (two novel junctions bracketing a plausibly exon-sized gap):\n",
     ce_txt, "\n",
     sprintf("Detection thresholds used: %s\n", thr_txt),
+    "Confidence tiers: \"high\" = the junction shares its donor or acceptor coordinate with an annotated/heavily-used splice site AND has a canonical (or unknown) splice motif; \"medium\" = anchored but non-canonical motif, or unanchored but canonical motif; \"low\" = shares neither endpoint with anything known/major -- treat low-confidence calls as needing manual verification (e.g. Sanger/RT-PCR), not as established.\n",
     "Differential splicing (top junctions by FDR-adjusted q-value; PSI = share of reads at that junction's donor/acceptor site; V1 method, a Fisher's exact test per junction, not a full replicate-variance model):\n",
     diff_txt
   )

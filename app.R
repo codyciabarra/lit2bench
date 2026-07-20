@@ -55,7 +55,7 @@ TOOLS <- list(
   list(id = "explorer", label = "Transcript Explorer", icon = "\U0001f9ed", group = "Design"),
   list(id = "extractor", label = "Exon Extractor",     icon = "\U00002702", group = "Design"),
   list(id = "design",   label = "Primer & Schematic", icon = "\U0001f9ec", group = "Design"),
-  list(id = "cryptic",  label = "Cryptic Exon Engine", icon = "\U0001f52c", group = "Design"),
+  list(id = "cryptic",  label = "Cryptic Splicing Engine", icon = "\U0001f52c", group = "Design"),
   list(id = "plasmid",  label = "Plasmid Creator",    icon = "\U0001f504", group = "Design"),
   list(id = "pcr",      label = "PCR Setup",          icon = "\U0001f9ea", group = "Design"),
   list(id = "qpcr",     label = "qPCR (ddCt)",        icon = "\U0001f4c9", group = "Analysis"),
@@ -127,7 +127,7 @@ panel_extractor <- function() {
       l2b_card(1, "Transcript", "Selected from the Transcript Explorer.", uiOutput("extractor_tx_info")),
       l2b_card(2, "Sequence", "One request for the whole transcript span, sliced locally into exons/introns.",
         actionButton("extractor_fetch", "Fetch sequences", class = "btn-run")),
-      l2b_card(3, "Design for a candidate exon", "A cryptic/novel exon (e.g. from the Cryptic Exon Engine) isn't in this list — enter its genomic coordinates directly and the flanking real exons in this transcript are found automatically, same as clicking a row above.",
+      l2b_card(3, "Design for a candidate exon", "A cryptic/novel exon (e.g. from the Cryptic Splicing Engine) isn't in this list — enter its genomic coordinates directly and the flanking real exons in this transcript are found automatically, same as clicking a row above.",
         fluidRow(column(6, numericInput("extractor_custom_start", "Start", value = NA)),
                  column(6, numericInput("extractor_custom_end", "End", value = NA))),
         actionButton("extractor_design_custom_go", "Design primers for this region →", class = "btn-alt", style = "width:auto;"))
@@ -223,7 +223,10 @@ panel_cryptic <- function() {
                         placeholder = "/path/to/SCR_DMSO.bam")),
         l2b_card(4, "Knockdown BAM path(s)", "Same as above, for the TDP-43 (or other) knockdown/knockout sample.",
           textAreaInput("cryptic_kd_paths", NULL, rows = 2, resize = "vertical",
-                        placeholder = "/path/to/TDP43KD_11j.bam"))),
+                        placeholder = "/path/to/TDP43KD_11j.bam")),
+        checkboxInput("cryptic_force_reindex",
+                      "Force re-index BAMs (ignore any existing .bai, rebuild from the file's current bytes -- slower, but a hard guarantee instead of a freshness check)",
+                      value = FALSE)),
       conditionalPanel("input.cryptic_bam_source == 'upload'",
         l2b_card(3, "Control BAM", "Select one or more replicate .bam files (and their .bai's, if you have them) together. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
           fileInput("cryptic_control_files", NULL, multiple = TRUE, accept = c(".bam", ".bai"))),
@@ -425,7 +428,7 @@ server <- function(input, output, session) {
   shared_selected_tx <- reactiveVal(NULL)
 
   # tell the client which tool is active so CSS can switch layout (full-width,
-  # no right rail, for wide-figure tools like the Cryptic Exon Engine)
+  # no right rail, for wide-figure tools like the Cryptic Splicing Engine)
   observe({
     session$sendCustomMessage("l2bTool", if (is.null(input$tool_tabs)) "design" else input$tool_tabs)
   })
@@ -667,7 +670,7 @@ server <- function(input, output, session) {
   # immediate neighbors (via the existing pick_flanking_exons()) as the
   # up/downstream flanks -- shared by every "click a row, jump to Design"
   # entry point: Exon Extractor's real-exon table, its manual candidate-exon
-  # coordinates, and the Cryptic Exon Engine's novel-junction/candidate-exon
+  # coordinates, and the Cryptic Splicing Engine's novel-junction/candidate-exon
   # tables. Takes tx_info = list(tx, name, gene_symbol) instead of reading
   # shared_selected_tx() directly so any panel with its own annotated
   # transcript (e.g. cryptic_res()$transcript) can reuse it, and err_setter
@@ -975,7 +978,8 @@ server <- function(input, output, session) {
     workdir <- file.path(tempdir(), paste0("cryptic_", session$token))
     if (identical(input$cryptic_bam_source, "path")) {
       resolve_local_bams(if (identical(label, "control")) input$cryptic_control_paths
-                          else input$cryptic_kd_paths, label)
+                          else input$cryptic_kd_paths, label,
+                          force_reindex = isTRUE(input$cryptic_force_reindex))
     } else {
       materialize_bam_uploads(if (identical(label, "control")) input$cryptic_control_files
                                else input$cryptic_kd_files, label, workdir)
@@ -1142,7 +1146,8 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
     out <- data.frame(
       Junction = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
-      `KD reads` = df$kd_reads, `Control reads` = df$control_reads, check.names = FALSE)
+      `KD reads` = df$kd_reads, `Control reads` = df$control_reads,
+      Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)
   output$cryptic_exon_tbl <- renderDT({
@@ -1150,7 +1155,8 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
     out <- data.frame(
       Span = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
-      `Length (bp)` = df$length, `KD reads` = df$kd_reads, `Control reads` = df$control_reads, check.names = FALSE)
+      `Length (bp)` = df$length, `KD reads` = df$kd_reads, `Control reads` = df$control_reads,
+      Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)
   output$cryptic_diff_tbl <- renderDT({

@@ -80,7 +80,7 @@ parse_locus_input <- function(text, assembly = "hg38", timeout_s = 15) {
     # fall back to an accession match -- covers RefSeq (NM_/NR_/NP_) and Ensembl
     # (ENST/ENSG) IDs, which UCSC's own tracks index via hgFindMatches/posName
     # rather than the symbol-prefix rule above. Purely additive: only tried once
-    # the exact-symbol rule (the one Cryptic Exon Engine already relies on) fails.
+    # the exact-symbol rule (the one Cryptic Splicing Engine already relies on) fails.
     hgmatches <- vapply(recs, function(r) {
       mm <- regmatches(r, regexpr('"hgFindMatches"\\s*:\\s*"([^"]*)"', r))
       if (length(mm) == 0 || !nzchar(mm)) return(NA_character_)
@@ -107,7 +107,8 @@ parse_locus_input <- function(text, assembly = "hg38", timeout_s = 15) {
 # 2. Turn a Shiny file upload into a properly-named, indexed BAM on disk.
 # --------------------------------------------------------------------------
 
-#' Which stem to hand Rsamtools for a BAM's index, or NA if there isn't one.
+#' Which stem to hand Rsamtools for a BAM's index, or NA if there isn't one
+#' USABLE.
 #'
 #' Rsamtools appends ".bai" to whatever `index=` it's given, and the two
 #' index-naming conventions in the wild disagree about the stem:
@@ -115,10 +116,21 @@ parse_locus_input <- function(text, assembly = "hg38", timeout_s = 15) {
 #'   picard/GATK BuildBamIndex    -> foo.bai       (stem = "foo")
 #' BamFile(path) only ever finds the first, so a Picard/GATK-indexed BAM read
 #' without this looks unindexed and gets needlessly re-indexed (or fails).
+#'
+#' An index older than its BAM is treated as if it doesn't exist, rather than
+#' trusted: the classic way this goes wrong is re-aligning/re-sorting a BAM in
+#' place without re-running samtools index, after which Rsamtools doesn't
+#' error -- it just reads whatever the stale offsets point to, which can be
+#' wrong or empty for the requested region. That reads exactly like "the tool
+#' doesn't work for this gene" rather than what it actually is (a stale
+#' index), so it's worth ruling out here rather than trusting file existence
+#' alone.
 .bam_index_stem <- function(bam_path) {
-  if (file.exists(paste0(bam_path, ".bai"))) return(bam_path)
+  bam_mtime <- file.info(bam_path)$mtime
+  fresh <- function(idx_path) file.exists(idx_path) && file.info(idx_path)$mtime >= bam_mtime
+  if (fresh(paste0(bam_path, ".bai"))) return(bam_path)
   stem <- sub("\\.bam$", "", bam_path, ignore.case = TRUE)
-  if (file.exists(paste0(stem, ".bai"))) return(stem)
+  if (fresh(paste0(stem, ".bai"))) return(stem)
   NA_character_
 }
 
@@ -136,8 +148,15 @@ parse_locus_input <- function(text, assembly = "hg38", timeout_s = 15) {
 #' .bam_index_stem(); a BAM with no index at all is indexed in place, which is
 #' the one case that writes (next to the BAM, needing a writable data dir).
 #'
+#' @param force_reindex ignore any existing .bai entirely (fresh or not) and
+#'        rebuild it from the BAM's current bytes. The mtime check in
+#'        .bam_index_stem() is a heuristic -- extremely reliable, but not a
+#'        checksum -- so this is the one way to get an actual guarantee
+#'        rather than high confidence: it can't be wrong because nothing
+#'        existing is ever trusted. Off by default because it pays a full
+#'        re-index (seconds to ~1 min per multi-GB BAM) on every call.
 #' @return list(paths, index_stems) -- parallel character vectors.
-resolve_local_bams <- function(text, label) {
+resolve_local_bams <- function(text, label, force_reindex = FALSE) {
   if (is.null(text) || !nzchar(trimws(text))) {
     stop(sprintf("No path given for %s. Enter the path to one or more .bam files.", label))
   }
@@ -158,13 +177,14 @@ resolve_local_bams <- function(text, label) {
   }
 
   stems <- vapply(paths, function(p) {
-    st <- .bam_index_stem(p)
+    st <- if (force_reindex) NA_character_ else .bam_index_stem(p)
     if (!is.na(st)) return(st)
     .require_bioc_bam_pkgs()
     tryCatch({
       Rsamtools::indexBam(p); p
     }, error = function(e) stop(sprintf(
-      paste0("%s: %s has no .bai next to it and indexing it in place failed: %s\n",
+      paste0("%s: %s has no usable .bai next to it (missing, or older than the BAM itself) ",
+             "and indexing it in place failed: %s\n",
              "The BAM must be coordinate-sorted, and its folder must be writable. ",
              "Otherwise index it yourself with: samtools index '%s'"),
       label, basename(p), conditionMessage(e), p)))
@@ -456,16 +476,114 @@ known_junctions_from_transcripts <- function(transcripts) {
 
 .junction_key <- function(df) sprintf("%d-%d", df$start, df$end)
 
-#' Compare control vs. knockdown junction tables against the known/annotated set.
+# --------------------------------------------------------------------------
+# 4a. Splice-site consensus (GT-AG, and the rarer GC-AG / AT-AC) -- CSF's own
+# validation strategy (see paper Table 1): real splicing overwhelmingly
+# produces these dinucleotides at the intron boundary no matter how few reads
+# support it, so a junction's motif is real, gene-agnostic evidence that
+# doesn't depend on tuning a read-count threshold per locus.
+# --------------------------------------------------------------------------
+
+.SPLICE_MOTIF_TABLE <- list(
+  "GT|AG" = list(strand = "+", class = "GT-AG"),
+  "GC|AG" = list(strand = "+", class = "GC-AG"),
+  "AT|AC" = list(strand = "+", class = "AT-AC"),
+  "CT|AC" = list(strand = "-", class = "GT-AG"),
+  "CT|GC" = list(strand = "-", class = "GC-AG"),
+  "GT|AT" = list(strand = "-", class = "AT-AC")
+)
+
+#' Classify one intron's boundary dinucleotides against splice-site consensus,
+#' read off a plus-strand reference window covering it. Checked as both a
+#' plus- and minus-strand intron (the gene's strand isn't always known up
+#' front, and a window can overlap more than one gene) -- a hit in either
+#' direction is real evidence of splicing; a hit in neither is "noncanonical".
+.junction_motif <- function(j_start, j_end, window_seq, window_start) {
+  n <- nchar(window_seq)
+  get2 <- function(i) if (!is.na(i) && i >= 1 && i + 1 <= n) substr(window_seq, i, i + 1) else NA_character_
+  low2  <- get2(j_start - window_start + 1)   # first 2 bases of the intron (plus-strand donor position)
+  high2 <- get2(j_end - window_start)         # last 2 bases of the intron (plus-strand acceptor position)
+  if (is.na(low2) || is.na(high2)) return(list(strand = NA_character_, class = NA_character_, canonical = NA))
+  hit <- .SPLICE_MOTIF_TABLE[[paste(low2, high2, sep = "|")]]
+  if (is.null(hit)) list(strand = NA_character_, class = "noncanonical", canonical = FALSE)
+  else list(strand = hit$strand, class = hit$class, canonical = TRUE)
+}
+
+#' fetch_genomic() (design_splicing_primers.R), memoized on the window --
+#' used only for the splice-motif check below. Failure is soft (returns NULL,
+#' motif columns come back NA/"unknown") so a transient network blip degrades
+#' confidence scoring rather than breaking detection, matching
+#' cached_transcripts()'s "annotation is best-effort" behavior.
+cached_genomic_seq <- function(cache, chrom, start, end, assembly = "hg38") {
+  key <- paste("seq", assembly, chrom, start, end, sep = "|")
+  hit <- if (is.null(cache)) NULL else cache[[key]]
+  if (!is.null(hit)) return(hit)
+  val <- tryCatch(fetch_genomic(chrom, start, end, assembly = assembly), error = function(e) NULL)
+  if (!is.null(cache) && !is.null(val)) assign(key, val, envir = cache)
+  val
+}
+
+#' Compare control vs. knockdown junction tables against the known/annotated
+#' set.
 #'
-#' @return list(novel_junctions, candidate_exons) -- two data.frames.
+#' This follows CSF's actual logic (Cryptic Splice site Finder; see paper
+#' Fig. 1A) rather than a flat read-count cutoff: a candidate cryptic/
+#' alternative splice site is only trustworthy when it's a MINOR variant of a
+#' MAJOR, well-used splice site -- i.e. it shares one exact coordinate (its
+#' donor OR its acceptor) with an already-annotated intron, or with a junction
+#' that's itself heavily used in this sample (whether or not RefSeq happens to
+#' have that isoform curated for this window). A junction that shares NEITHER
+#' end with anything real is far more likely to be a misalignment/template-
+#' switching artifact than genuine aberrant splicing, no matter how "novel" it
+#' looks against the annotation -- so it's held to a much higher read-count
+#' bar (`unanchored_read_mult`) instead of being treated the same as an
+#' anchored one. This is what makes detection work the same way on a locus
+#' nobody has hand-tuned thresholds for as it does on UNC13A/STMN2: lowering
+#' "Min KD reads" for a low-depth gene is safe because anchoring (and the
+#' splice-motif check) keeps noise out even at low read counts, exactly the
+#' way CSF calls remain reliable "even if supported by just a single EST".
+#'
+#' @param window_seq,window_seq_start optional: plus-strand reference sequence
+#'        for the locus (from cached_genomic_seq()) and its first genomic
+#'        coordinate, for the splice-motif check. NULL skips it (motif columns
+#'        come back NA) -- never required for detection to run.
+#' @param unanchored_read_mult a junction sharing neither endpoint with an
+#'        annotated or heavily-used splice site needs this many times
+#'        min_kd_reads to be reported at all -- higher bar, not exclusion,
+#'        since real but rare two-ended-novel events do happen (e.g. a fully
+#'        novel first exon, whose flanking sites are themselves unannotated).
+#' @return list(novel_junctions, candidate_exons) -- two data.frames, each
+#'   carrying `confidence` ("high"/"medium"/"low") alongside the coordinate/
+#'   read-support columns callers already relied on.
 #'   novel_junctions: individual KD junctions absent from annotation, control-quiet.
 #'   candidate_exons: pairs of novel junctions bracketing a gap the size of a
 #'     plausible exon (exon_len_range bp) -- the actual "new exon" signature.
 detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                                        min_kd_reads = 3, max_control_reads = 1,
-                                       exon_len_range = c(20, 400)) {
+                                       exon_len_range = c(20, 400),
+                                       window_seq = NULL, window_seq_start = NULL,
+                                       unanchored_read_mult = 3) {
   known_keys <- .junction_key(known_junc)
+  known_starts <- unique(known_junc$start)
+  known_ends <- unique(known_junc$end)
+
+  # "Major" observed splice sites -- endpoints used heavily in the CONTROL
+  # sample, whether or not RefSeq's curated set for this window includes that
+  # isoform. Anchoring against this (in addition to the annotation) is what
+  # keeps detection working on genes with a lot of uncurated or tissue-
+  # specific alternative splicing, not just genes whose structure matches
+  # RefSeq exactly. Deliberately control-only, NOT control+KD: a candidate
+  # novel junction is already required to be control-quiet, so it can never
+  # anchor off its own read count this way -- pooling KD in here would let a
+  # sufficiently well-supported artifact "anchor" against itself.
+  major_min_reads <- max(5, min_kd_reads)
+  major <- if (nrow(control_junc) > 0) {
+    ctrl_agg <- stats::aggregate(reads ~ start + end, data = control_junc, sum)
+    ctrl_agg[ctrl_agg$reads >= major_min_reads, , drop = FALSE]
+  } else data.frame(start = integer(0), end = integer(0), reads = integer(0))
+  anchor_starts <- union(known_starts, major$start)
+  anchor_ends <- union(known_ends, major$end)
+
   ctrl_keys <- .junction_key(control_junc)
   ctrl_reads_by_key <- stats::setNames(control_junc$reads, ctrl_keys)
 
@@ -474,10 +592,31 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   kd$annotated <- kd$key %in% known_keys
   kd$control_reads <- ifelse(kd$key %in% names(ctrl_reads_by_key),
                               unname(ctrl_reads_by_key[kd$key]), 0L)
+  kd$anchor_donor <- kd$start %in% anchor_starts
+  kd$anchor_acceptor <- kd$end %in% anchor_ends
+  kd$anchored <- kd$anchor_donor | kd$anchor_acceptor
 
-  novel <- kd[!kd$annotated & kd$reads >= min_kd_reads & kd$control_reads <= max_control_reads, ]
-  novel <- novel[order(-novel$reads), c("start", "end", "reads", "control_reads")]
-  names(novel) <- c("start", "end", "kd_reads", "control_reads")
+  kd$motif_class <- rep(NA_character_, nrow(kd))
+  kd$motif_canonical <- rep(NA, nrow(kd))
+  if (!is.null(window_seq) && !is.null(window_seq_start) && nrow(kd) > 0) {
+    motif <- lapply(seq_len(nrow(kd)), function(i)
+      .junction_motif(kd$start[i], kd$end[i], window_seq, window_seq_start))
+    kd$motif_class <- vapply(motif, function(m) if (is.null(m$class)) NA_character_ else m$class, character(1))
+    kd$motif_canonical <- vapply(motif, function(m) if (is.null(m$canonical)) NA else m$canonical, logical(1))
+  }
+
+  kd$confidence <- ifelse(kd$anchored & (is.na(kd$motif_canonical) | kd$motif_canonical), "high",
+                    ifelse(kd$anchored, "medium",
+                    ifelse(isTRUE(kd$motif_canonical), "medium", "low")))
+
+  passes <- !kd$annotated & kd$control_reads <= max_control_reads &
+    ifelse(kd$anchored, kd$reads >= min_kd_reads, kd$reads >= min_kd_reads * unanchored_read_mult)
+
+  novel <- kd[passes, ]
+  novel <- novel[order(factor(novel$confidence, levels = c("high", "medium", "low")), -novel$reads),
+                 c("start", "end", "reads", "control_reads", "anchor_donor", "anchor_acceptor",
+                   "motif_class", "motif_canonical", "confidence")]
+  names(novel)[names(novel) == "reads"] <- "kd_reads"
   rownames(novel) <- NULL
 
   spans <- list()
@@ -488,18 +627,44 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
         gap_start <- ord$end[i] + 1
         gap_end <- ord$start[j] - 1
         gap_len <- gap_end - gap_start + 1
-        if (gap_len >= exon_len_range[1] && gap_len <= exon_len_range[2]) {
-          spans[[length(spans) + 1]] <- data.frame(
-            start = gap_start, end = gap_end, length = gap_len,
-            kd_reads = min(ord$kd_reads[i], ord$kd_reads[j]),
-            control_reads = max(ord$control_reads[i], ord$control_reads[j]))
+        if (gap_len < exon_len_range[1] || gap_len > exon_len_range[2]) next
+
+        # The real "cryptic exon inclusion" signature: the upstream junction
+        # keeps the real donor (its start anchors) and the downstream junction
+        # keeps the real acceptor (its end anchors) -- only the two INNER
+        # splice sites, immediately flanking the candidate exon, are novel.
+        # Pairing two junctions that are novel at BOTH ends is much weaker
+        # evidence (more likely two unrelated artifacts an exon-length apart),
+        # so it's kept as a "low" confidence tier under a stricter read bar
+        # rather than silently dropped -- CSF itself flags such calls for
+        # manual verification rather than excluding them outright.
+        donor_ok <- isTRUE(ord$anchor_donor[i])
+        acceptor_ok <- isTRUE(ord$anchor_acceptor[j])
+        min_reads <- min(ord$kd_reads[i], ord$kd_reads[j])
+        if (donor_ok && acceptor_ok) {
+          conf <- if (identical(ord$confidence[i], "high") && identical(ord$confidence[j], "high")) "high" else "medium"
+        } else if (donor_ok || acceptor_ok) {
+          if (min_reads < min_kd_reads * unanchored_read_mult) next
+          conf <- "medium"
+        } else {
+          if (min_reads < min_kd_reads * unanchored_read_mult) next
+          conf <- "low"
         }
+        spans[[length(spans) + 1]] <- data.frame(
+          start = gap_start, end = gap_end, length = gap_len,
+          kd_reads = min_reads, control_reads = max(ord$control_reads[i], ord$control_reads[j]),
+          confidence = conf, stringsAsFactors = FALSE)
       }
     }
   }
   candidate_exons <- if (length(spans) > 0) do.call(rbind, spans) else
     data.frame(start = integer(0), end = integer(0), length = integer(0),
-               kd_reads = integer(0), control_reads = integer(0))
+               kd_reads = integer(0), control_reads = integer(0), confidence = character(0))
+  if (nrow(candidate_exons) > 0) {
+    candidate_exons <- unique(candidate_exons)
+    candidate_exons <- candidate_exons[order(factor(candidate_exons$confidence, levels = c("high", "medium", "low")),
+                                              -candidate_exons$kd_reads), ]
+  }
   rownames(candidate_exons) <- NULL
 
   list(novel_junctions = novel, candidate_exons = candidate_exons)
@@ -573,11 +738,14 @@ run_cryptic_detection <- function(locus, control_bams, kd_bams, assembly, thresh
   kd_track <- cached_track_data(cache, kd_bams$paths, locus$chrom, locus$start, locus$end,
                                  index_stems = kd_bams$index_stems)
 
+  window_seq <- cached_genomic_seq(cache, locus$chrom, locus$start, locus$end, assembly = assembly)
+
   known_junc <- known_junctions_from_transcripts(transcripts)
   candidates <- detect_cryptic_candidates(
     control_track$junctions, kd_track$junctions, known_junc,
     min_kd_reads = thresholds$min_kd_reads, max_control_reads = thresholds$max_control_reads,
-    exon_len_range = c(thresholds$exon_min, thresholds$exon_max))
+    exon_len_range = c(thresholds$exon_min, thresholds$exon_max),
+    window_seq = window_seq, window_seq_start = locus$start)
   diff_tbl <- differential_splicing_table(control_track$per_replicate, kd_track$per_replicate, known_junc)
 
   res <- build_cryptic_result(locus, control_track, kd_track, transcripts, candidates)
