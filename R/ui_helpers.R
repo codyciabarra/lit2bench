@@ -59,12 +59,25 @@ L2B_CSS <- "
   ::-webkit-scrollbar-thumb { background:var(--l2b-scrollbar); border-radius:8px; }
 
   html, body { background:var(--l2b-bg); }
+  /* A slow-drifting glow wash instead of a static gradient -- the 'moving,
+     living background' read: three oversized radial blobs panned gently
+     and independently via background-position (background-size gives each
+     one room to travel), never fast enough to distract from the actual UI. */
   body { color:var(--l2b-text); transition:background-color .2s, color .2s;
     background-image:
-      radial-gradient(1100px 760px at 12% -8%, var(--l2b-glow-1), transparent 60%),
-      radial-gradient(950px 680px at 104% 6%, var(--l2b-glow-2), transparent 58%),
-      radial-gradient(900px 820px at 46% 118%, var(--l2b-glow-3), transparent 62%);
-    background-attachment:fixed; background-repeat:no-repeat; }
+      radial-gradient(1100px 760px at 50% 50%, var(--l2b-glow-1), transparent 60%),
+      radial-gradient(950px 680px at 50% 50%, var(--l2b-glow-2), transparent 58%),
+      radial-gradient(900px 820px at 50% 50%, var(--l2b-glow-3), transparent 62%);
+    background-size:170% 170%, 160% 160%, 180% 180%;
+    background-position:6% -4%, 100% 4%, 42% 108%;
+    background-attachment:fixed; background-repeat:no-repeat;
+    animation:l2bDrift 34s ease-in-out infinite alternate; }
+  @keyframes l2bDrift {
+    0%   { background-position:6% -4%, 100% 4%, 42% 108%; }
+    50%  { background-position:14% 4%, 90% 14%, 34% 96%; }
+    100% { background-position:2% 10%, 96% -2%, 50% 102%; }
+  }
+  @media (prefers-reduced-motion: reduce) { body { animation:none; } }
   a { color:var(--l2b-accent-text); }
 
   /* ================= TOPBAR ================= */
@@ -220,8 +233,10 @@ L2B_CSS <- "
 
   /* ================= HERO STATS ================= */
   .l2b-hero { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px; }
-  .l2b-stat { flex:1 1 140px; background:var(--l2b-surface-2);
-    border:1px solid var(--l2b-border); border-radius:13px; padding:13px 16px; }
+  .l2b-stat { flex:1 1 140px; background:var(--l2b-glass-2); backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px); border:1px solid var(--l2b-glass-border); border-radius:13px;
+    padding:13px 16px; box-shadow:inset 0 1px 0 var(--l2b-glass-highlight); transition:transform .18s, box-shadow .18s; }
+  .l2b-stat:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(20,20,40,.12), inset 0 1px 0 var(--l2b-glass-highlight); }
   .l2b-stat.accent { background:var(--l2b-secondary-soft); border-color:rgba(242,163,65,.35); }
   .l2b-stat.good { background:var(--l2b-success-soft); border-color:rgba(47,191,113,.35); }
   .l2b-stat.bad { background:var(--l2b-danger-soft); border-color:rgba(242,85,91,.35); }
@@ -271,17 +286,30 @@ L2B_CSS <- "
   /* ================= MESSAGES ================= */
   .l2b-warn { background:var(--l2b-secondary-soft); border-left:4px solid var(--l2b-secondary); border-radius:9px;
     padding:11px 15px; margin-top:16px; color:var(--l2b-text); font-size:13px; }
-  .l2b-err { background:var(--l2b-danger-soft); border-left:4px solid var(--l2b-danger); border-radius:9px;
+  .l2b-err { background:var(--l2b-danger-soft); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border-left:4px solid var(--l2b-danger); border-radius:9px;
     padding:12px 16px; color:var(--l2b-text); font-size:14px; font-weight:550; }
   .l2b-empty { text-align:center; padding:56px 20px; color:var(--l2b-text-muted); }
-  .l2b-empty-icon { font-size:40px; margin-bottom:10px; opacity:.6; }
+  /* the empty-state glyph as a small floating glass bubble (with its own
+     mirror reflection underneath) rather than a bare emoji -- the same
+     product-shot idiom as the brand mark, so the very first thing a new
+     tool shows already feels like it belongs to this design system. */
+  .l2b-empty-icon { position:relative; display:inline-flex; align-items:center; justify-content:center;
+    width:72px; height:72px; margin-bottom:14px; border-radius:22px; font-size:32px;
+    background:var(--l2b-glass-2); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    border:1px solid var(--l2b-glass-border); box-shadow:0 8px 24px rgba(20,20,40,.16), inset 0 1px 0 var(--l2b-glass-highlight); }
+  .l2b-empty-icon::after { content:''; position:absolute; left:8%; right:8%; top:100%; height:18px;
+    margin-top:3px; border-radius:0 0 14px 14px; background:var(--l2b-glass-2);
+    opacity:.5; transform:scaleY(-1); -webkit-mask-image:linear-gradient(to bottom, rgba(0,0,0,.5), transparent);
+            mask-image:linear-gradient(to bottom, rgba(0,0,0,.5), transparent); pointer-events:none; }
 
   /* ================= INPUTS ================= */
   .form-control, .form-select, .selectize-input { border-radius:10px !important;
-    border-color:var(--l2b-border-strong) !important; background:var(--l2b-surface-2) !important;
+    border-color:var(--l2b-glass-border) !important; background:var(--l2b-glass-2) !important;
+    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
     color:var(--l2b-text) !important; font-size:14.5px !important; }
   .form-control:focus, .form-select:focus { border-color:var(--l2b-accent) !important;
-    box-shadow:0 0 0 3px var(--l2b-accent-soft) !important; background:var(--l2b-surface-2) !important; color:var(--l2b-text) !important; }
+    box-shadow:0 0 0 3px var(--l2b-accent-soft) !important; background:var(--l2b-glass-2) !important; color:var(--l2b-text) !important; }
   .form-control::placeholder { color:var(--l2b-text-faint) !important; }
   label { font-weight:600 !important; font-size:13.5px !important; color:var(--l2b-text-muted) !important; }
 
@@ -347,19 +375,66 @@ L2B_CSS <- "
     .l2b-nav { position:static; }
   }
 
-  /* ================= INLINE SASHIMI FIGURE ================= */
-  .l2b-sashimi { overflow-x:auto; border:1px solid var(--l2b-border); border-radius:12px;
-    background:var(--l2b-surface-2); padding:10px 12px; }
-  .l2b-sashimi svg { width:100%; height:auto; min-width:720px; display:block; }
+  /* ================= INLINE SASHIMI FIGURE =================
+     A resizable viewport (drag the grip below it, IGV-style track-height
+     resizing) rather than a fixed-aspect image: the container gets an
+     explicit, user-adjustable height, and the SVG fills it via its own
+     viewBox scaling (default preserveAspectRatio 'xMidYMid meet' -- scales
+     to fit both dimensions without distortion, letterboxing evenly rather
+     than ever overflowing or stretching). Taller by default than the old
+     aspect-locked version so it reads as a real figure, not a strip. */
+  .l2b-sashimi { overflow-x:auto; overflow-y:hidden; border:1px solid var(--l2b-glass-border);
+    border-bottom:none; border-radius:12px 12px 0 0; position:relative; height:560px;
+    background:var(--l2b-glass-2); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    box-shadow:inset 0 1px 0 var(--l2b-glass-highlight); padding:10px 12px; }
+  .l2b-sashimi svg { width:100%; height:100%; min-width:720px; display:block; }
+  /* Expand view forces the SVG to its native pixel width (wider than the
+     container, for horizontal scroll) via inline style -- height is set
+     to 'auto' alongside it (SASHIMI_JS's setExpanded()) so the figure
+     renders at its true aspect ratio rather than being stretched/
+     letterboxed to fit a container it's now deliberately wider than. */
+
+  /* A thin, always-visible drag handle under the figure -- the actual
+     resize affordance (IGV's track-height drag, the ask this answers).
+     A dedicated strip rather than a corner grip (the native CSS
+     `resize` property's usual spot) because it's discoverable at a
+     glance and full-width, not a tiny 12px corner easy to miss. */
+  .l2b-sashimi-resize-handle { height:16px; border:1px solid var(--l2b-glass-border); border-top:none;
+    border-radius:0 0 12px 12px; background:var(--l2b-glass-2); backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px); display:flex; align-items:center; justify-content:center;
+    cursor:ns-resize; user-select:none; }
+  .l2b-sashimi-resize-handle:hover { background:var(--l2b-surface-hover); }
+  .l2b-sashimi-resize-handle .l2b-grip { width:32px; height:4px; border-radius:3px;
+    background:var(--l2b-border-strong); transition:background .15s, width .15s; }
+  .l2b-sashimi-resize-handle:hover .l2b-grip { background:var(--l2b-accent); width:46px; }
+  body.l2b-resizing, body.l2b-resizing * { cursor:ns-resize !important; user-select:none !important; }
+
   .l2b-fig-cap { font-size:12px; color:var(--l2b-text-muted); margin:8px 2px 0; line-height:1.5; }
 
   /* ================= LOCAL-MODEL INTERPRETATION ================= */
-  .l2b-llm-answer { background:var(--l2b-surface-2); border:1px solid var(--l2b-border);
-    border-left:3px solid var(--l2b-accent); border-radius:10px; padding:16px 18px; margin-bottom:12px;
+  .l2b-llm-answer { background:var(--l2b-glass-2); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border:1px solid var(--l2b-glass-border); border-left:3px solid var(--l2b-accent); border-radius:10px;
+    padding:16px 18px; margin-bottom:12px; box-shadow:inset 0 1px 0 var(--l2b-glass-highlight);
     font-size:14.5px; line-height:1.6; color:var(--l2b-text); }
   .l2b-llm-sources { font-size:12px; color:var(--l2b-text-muted); margin-bottom:14px; line-height:1.7; }
   .l2b-llm-sources a { color:var(--l2b-accent-text); text-decoration:none; }
   .l2b-llm-sources a:hover { text-decoration:underline; }
+
+  /* ================= ENTRANCE REVEAL =================
+     A one-time settle-in on first paint (panels are built once and never
+     rebuilt per CLAUDE.md, so this fires once per page load, not per tab
+     switch) -- the 'landing page' feel of the chrome arriving rather than
+     just appearing. Nav/main/aside stagger slightly, left to right. */
+  @keyframes l2bRise { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+  .l2b-nav, .l2b-card, .l2b-aside-card { animation:l2bRise .6s cubic-bezier(.2,.8,.2,1) both; }
+  .l2b-nav { animation-delay:0s; }
+  .l2b-col-main .l2b-card { animation-delay:.06s; }
+  .l2b-col-aside .l2b-aside-card:nth-of-type(1) { animation-delay:.12s; }
+  .l2b-col-aside .l2b-aside-card:nth-of-type(2) { animation-delay:.17s; }
+  .l2b-col-aside .l2b-aside-card:nth-of-type(3) { animation-delay:.22s; }
+  @media (prefers-reduced-motion: reduce) {
+    .l2b-nav, .l2b-card, .l2b-aside-card { animation:none; }
+  }
 "
 
 # Client-side theme toggle (instant, no server round-trip needed to repaint the

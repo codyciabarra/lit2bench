@@ -1074,8 +1074,9 @@ server <- function(input, output, session) {
                 div(style = "font-size:11.5px; color:var(--l2b-text-faint); flex:1 1 auto;",
                     "Hover a feature for detail · click to pin · double-click the plot to zoom in · both filters apply instantly"))),
         div(class = "l2b-sashimi", HTML(sashimi_svg(r, dark = dark_mode()))),
+        div(class = "l2b-sashimi-resize-handle", title = "Drag to resize", div(class = "l2b-grip")),
         div(class = "l2b-fig-cap",
-            "Coverage wiggles (control blue, knockdown orange) share one depth scale; arcs are splice junctions, thickness and height scaled by supporting reads and labelled with the count. Novel junctions are drawn in red. Drag to scroll if the region is wide."),
+            "Coverage wiggles (control blue, knockdown orange) share one depth scale; arcs are splice junctions, thickness and height scaled by supporting reads and labelled with the count. Novel junctions are drawn in red. Drag the figure to scroll if the region is wide, or drag the handle below it to resize."),
         br(),
         div(style = "display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px;",
             downloadButton("cryptic_download_pdf", "Download PDF figure", class = "btn-dl"),
@@ -1084,9 +1085,15 @@ server <- function(input, output, session) {
         tabsetPanel(id = "cryptic_result_tabs", type = "tabs",
           tabPanel(sprintf("Novel junctions (%d)", n_nj),
             br(),
+            # value seeded from the current input rather than a hardcoded FALSE:
+            # this whole card (output$cryptic_out) is one renderUI that rebuilds
+            # on every "Run detection" AND every zoom step, which would otherwise
+            # silently reset this checkbox (and the filter it drives) each time --
+            # isolate() reads the live value without making this renderUI block
+            # re-run every time the checkbox itself changes.
             checkboxInput("cryptic_single_pair_only",
                           "Localized to one exon pair only (hide junctions that skip a whole annotated exon)",
-                          value = FALSE),
+                          value = isolate(input$cryptic_single_pair_only) %||% FALSE),
             DTOutput("cryptic_junc_tbl"),
             p(class = "l2b-card-sub", "Select a junction row above, then jump straight to the Primer Designer — no manual coordinate entry."),
             actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;")

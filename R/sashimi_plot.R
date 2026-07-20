@@ -594,10 +594,14 @@ SASHIMI_JS <- "
   });
 
   // \"Expand view\": swap the SVG's on-screen size from the CSS default
-  // (width:100%, squished to fit -- the original compact look) to its real
-  // native pixel width (data-native-width, set in sashimi_svg()), which an
-  // inline style always wins over a stylesheet rule for, no !important
-  // needed. Toggling back just clears the inline style so CSS retakes over.
+  // (width:100%, height:100% -- scaled to fit the resizable container) to
+  // its real native pixel width (data-native-width, set in sashimi_svg()),
+  // which an inline style always wins over a stylesheet rule for, no
+  // !important needed. Height is switched to 'auto' alongside it so the
+  // figure renders at its true aspect ratio at that native width, rather
+  // than being stretched/letterboxed to fit a container it's now
+  // deliberately wider than. Toggling back clears both inline styles so
+  // CSS (and the drag-resized height) retake over.
   function setExpanded(box, expand){
     var svg = box.querySelector('svg');
     if (!svg) return;
@@ -605,8 +609,12 @@ SASHIMI_JS <- "
     if (expand) {
       var w = svg.dataset.nativeWidth;
       svg.style.width = w + 'px'; svg.style.minWidth = w + 'px'; svg.style.maxWidth = 'none';
+      svg.style.height = 'auto';
+      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     } else {
       svg.style.width = ''; svg.style.minWidth = ''; svg.style.maxWidth = '';
+      svg.style.height = '';
+      svg.setAttribute('preserveAspectRatio', 'none');
       box.scrollLeft = 0;
     }
     var btn = box.parentElement && box.parentElement.querySelector('.sashimi-expand-toggle');
@@ -738,7 +746,35 @@ SASHIMI_JS <- "
   document.addEventListener('fullscreenchange', onFsChange);
   document.addEventListener('webkitfullscreenchange', onFsChange);
 
-  // live filtering -- purely client-side, no Shiny round-trip
+  // live filtering -- purely client-side, no Shiny round-trip. The slider/
+  // checkbox are plain HTML re-emitted fresh (with their hardcoded default
+  // attributes) every time app.R's renderUI rebuilds the whole results card
+  // -- which double-click-to-zoom does, since the coverage/junctions
+  // genuinely change at the new window -- so without remembering the
+  // user's actual values in JS, every zoom silently reset 'Min. junction
+  // reads' back to 1 and un-checked 'Novel junctions only'. filterState is
+  // the fix: it's the source of truth, re-stamped onto whatever fresh
+  // slider/checkbox DOM nodes show up (restoreFilterControls(), called from
+  // the same re-render observer below) rather than trusting the DOM's own
+  // (reset-to-default) values.
+  var filterState = { minReads: 1, novelOnly: false };
+  function restoreFilterControls(){
+    var slider = document.querySelector('.sashimi-filter-reads');
+    if (slider) {
+      var max = Number(slider.max) || filterState.minReads || 1;
+      var v = String(Math.min(filterState.minReads, max));
+      if (slider.value !== v) slider.value = v;
+      // textContent assignment is itself a childList mutation, and this
+      // function runs FROM the MutationObserver callback below -- an
+      // unconditional assignment here would retrigger that same observer
+      // forever (the equality guard is what makes this safe, exactly like
+      // applyFilter()'s own guard on the same element further down).
+      var out = document.getElementById('sashimi_filter_val');
+      if (out && out.textContent !== v) out.textContent = v;
+    }
+    var novelOnly = document.querySelector('.sashimi-filter-novel');
+    if (novelOnly && novelOnly.checked !== filterState.novelOnly) novelOnly.checked = filterState.novelOnly;
+  }
   function applyFilter(){
     var slider = document.querySelector('.sashimi-filter-reads');
     if (!slider) return;
@@ -753,13 +789,76 @@ SASHIMI_JS <- "
     var out = document.getElementById('sashimi_filter_val');
     if (out && out.textContent !== slider.value) out.textContent = slider.value;
   }
-  document.addEventListener('input', function(e){ if (e.target.matches && e.target.matches('.sashimi-filter-reads')) applyFilter(); });
-  document.addEventListener('change', function(e){ if (e.target.matches && e.target.matches('.sashimi-filter-novel')) applyFilter(); });
+  document.addEventListener('input', function(e){
+    if (e.target.matches && e.target.matches('.sashimi-filter-reads')) {
+      filterState.minReads = Number(e.target.value); applyFilter();
+    }
+  });
+  document.addEventListener('change', function(e){
+    if (e.target.matches && e.target.matches('.sashimi-filter-novel')) {
+      filterState.novelOnly = e.target.checked; applyFilter();
+    }
+  });
 
-  // re-apply the current filter whenever a new figure appears (Shiny re-render)
+  // Drag-to-resize figure height (the IGV-style track-height drag) --
+  // persisted in localStorage (survives reloads, like the theme toggle
+  // does) and re-applied on every re-render via the same observer that
+  // restores the filter controls, since a fresh render also emits a fresh
+  // (un-resized) .l2b-sashimi box.
+  function clampSashimiHeight(h){ return Math.max(220, Math.min(window.innerHeight * 1.6, h)); }
+  function loadSashimiHeight(){
+    try { var v = Number(localStorage.getItem('l2b-sashimi-height')); return v > 0 ? v : 560; }
+    catch (e) { return 560; }
+  }
+  var sashimiHeight = loadSashimiHeight();
+  function applySashimiHeight(){
+    var box = document.querySelector('.l2b-sashimi');
+    if (box && !box.classList.contains('l2b-sashimi-expanded')) box.style.height = sashimiHeight + 'px';
+  }
+  document.addEventListener('mousedown', function(e){
+    var handle = e.target.closest ? e.target.closest('.l2b-sashimi-resize-handle') : null;
+    if (!handle || e.button !== 0) return;
+    var box = document.querySelector('.l2b-sashimi');
+    if (!box) return;
+    e.preventDefault();
+    var startY = e.pageY, startH = box.getBoundingClientRect().height;
+    document.body.classList.add('l2b-resizing');
+    function onMove(e2){
+      sashimiHeight = clampSashimiHeight(startH + (e2.pageY - startY));
+      box.style.height = sashimiHeight + 'px';
+    }
+    function onUp(){
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('l2b-resizing');
+      try { localStorage.setItem('l2b-sashimi-height', String(sashimiHeight)); } catch (e3) {}
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // A fresh SVG (every Shiny re-render) has no preserveAspectRatio
+  // attribute yet -- default 'none' so the figure fills the resizable
+  // compact-view box edge to edge (matching applySashimiHeight() below)
+  // instead of the SVG default (meet), which would center it with blank
+  // letterbox bars above/below whenever the box is taller than the
+  // figure's own natural aspect ratio -- exactly what dragging the handle
+  // taller is for.
+  function applyPreserveAspectRatio(){
+    var box = document.querySelector('.l2b-sashimi');
+    var svg = box && box.querySelector('svg');
+    if (!svg) return;
+    svg.setAttribute('preserveAspectRatio', box.classList.contains('l2b-sashimi-expanded') ? 'xMidYMid meet' : 'none');
+  }
+
+  // re-apply the current filter + drag-resized height whenever a new
+  // figure appears (Shiny re-render, e.g. after a zoom step)
   var mo = new MutationObserver(function(muts){
     for (var i = 0; i < muts.length; i++) {
-      if (muts[i].addedNodes && muts[i].addedNodes.length) { applyFilter(); break; }
+      if (muts[i].addedNodes && muts[i].addedNodes.length) {
+        restoreFilterControls(); applyFilter(); applySashimiHeight(); applyPreserveAspectRatio();
+        break;
+      }
     }
   });
   function startObserving(){ mo.observe(document.body, { childList: true, subtree: true }); }
