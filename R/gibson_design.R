@@ -128,14 +128,15 @@ design_gibson <- function(fragments, circular = TRUE, overlap = 25,
     if (!is.na(next_i)) {
       ov <- min(overlap, nchar(this_seq))
       ov_seq <- substr(this_seq, nchar(this_seq) - ov + 1, nchar(this_seq))
+      ov_gc <- .gib_gc(ov_seq)
       junc_rows[[i]] <- data.frame(
         junction = sprintf("%s → %s", this_name, names_[next_i]),
-        overlap_bp = ov, overlap_gc = round(.gib_gc(ov_seq), 0),
+        overlap_bp = ov, overlap_gc = round(ov_gc, 0),
         overlap_seq = ov_seq, stringsAsFactors = FALSE)
-      if (.gib_gc(ov_seq) < 30 || .gib_gc(ov_seq) > 75)
+      if (ov_gc < 30 || ov_gc > 75)
         warnings_ <- c(warnings_, sprintf(
-          "Junction %s → %s overlap is %.0f%% GC -- outside the ~40-60%% comfort zone for a clean anneal.",
-          this_name, names_[next_i], .gib_gc(ov_seq)))
+          "Junction %s → %s overlap is %.0f%% GC -- outside the 30-75%% workable range (aim for 40-60%%) for a clean, specific anneal.",
+          this_name, names_[next_i], ov_gc))
     }
   }
 

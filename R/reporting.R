@@ -86,8 +86,8 @@ session_references <- function(used) {
 #' Build a Methods paragraph from lab parameters + what the app did.
 #' Unspecified fields are rendered as [bracketed placeholders] so the user can
 #' see exactly what still needs filling -- never silently invented.
-#' @param params list(cell_line, rna_kit, rt_enzyme, input_rna, mastermix,
-#'   qpcr_machine, polymerase, cycling)
+#' @param params list(cell_line, rna_kit, rt_enzyme, input_rna, housekeeping,
+#'   mastermix, qpcr_machine, polymerase, cycling, assembly)
 #' @param used named logical list of what ran (adds the computational sentences)
 #' @param genes optional character vector of gene symbols examined
 methods_paragraph <- function(params, used = list(), genes = character(0)) {

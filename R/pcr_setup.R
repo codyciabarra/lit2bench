@@ -29,6 +29,11 @@
 pcr_setup <- function(components, final_volume_uL, num_reactions = 1,
                        excess_fold = 1.1, min_pipette_uL = 0.5) {
   if (length(components) == 0) stop("No components provided.")
+  if (!is.numeric(final_volume_uL) || length(final_volume_uL) != 1 ||
+      is.na(final_volume_uL) || final_volume_uL <= 0)
+    stop("Final reaction volume must be a positive number (uL).")
+  if (is.na(num_reactions) || num_reactions < 1) stop("Number of reactions must be at least 1.")
+  if (is.na(excess_fold) || excess_fold < 1) stop("Master-mix excess factor must be >= 1 (1.0 = no overage).")
 
   rows <- lapply(components, function(c) {
     if (!is.null(c$fixed_volume_uL)) {

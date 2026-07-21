@@ -24,9 +24,25 @@ relative_expression <- function(data, calibrator) {
   samples <- do.call(rbind, rows)
   rownames(samples) <- NULL
 
-  list(calibrator = calibrator, samples = samples,
-       warnings = paste0("Assumes ~100% amplification efficiency for both target and reference. ",
-                          "If efficiencies differ, use the Pfaffl method instead."))
+  warnings_ <- paste0("Assumes ~100% amplification efficiency for both target and reference. ",
+                      "If efficiencies differ, use the Pfaffl method instead.")
+
+  # Near-detection-limit Ct: >=35 is noisy, fold-changes there are unreliable.
+  all_ct <- unlist(lapply(dcts, function(d) c(d$ct_t, d$ct_r)))
+  if (any(all_ct >= 35, na.rm = TRUE))
+    warnings_ <- c(warnings_, paste0(
+      "One or more Ct values are >= 35 -- near the detection limit, where Ct is noisy ",
+      "and fold-changes are unreliable. Treat those samples as low-confidence."))
+
+  # Normalizer stability: the reference gene should be steady across conditions;
+  # a wide spread means dCt (and therefore ddCt) is riding on the normalizer.
+  ref_cts <- vapply(names(dcts), function(nm) dcts[[nm]]$ct_r, numeric(1))
+  if (length(ref_cts) > 1 && diff(range(ref_cts)) > 1)
+    warnings_ <- c(warnings_, sprintf(
+      "Reference Ct spans %.1f cycles across samples (%.1f-%.1f) -- an unstable normalizer inflates ddCt error. Confirm the housekeeping gene is steady across your conditions.",
+      diff(range(ref_cts)), min(ref_cts), max(ref_cts)))
+
+  list(calibrator = calibrator, samples = samples, warnings = warnings_)
 }
 
 summary_qpcr <- function(res) {
