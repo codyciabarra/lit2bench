@@ -40,6 +40,7 @@ source("R/pubmed.R")
 source("R/cryptic_interpret.R")
 source("R/exon_extractor.R")
 source("R/transcript_explorer.R")
+source("R/batch_loci.R")
 
 `%||%` <- function(x, default) if (is.null(x) || (length(x) == 1 && is.na(x)) || (is.character(x) && !nzchar(x))) default else x
 
@@ -56,6 +57,7 @@ TOOLS <- list(
   list(id = "extractor", label = "Exon Extractor",     icon = "\U00002702", group = "Design"),
   list(id = "design",   label = "Primer & Schematic", icon = "\U0001f9ec", group = "Design"),
   list(id = "cryptic",  label = "Cryptic Splicing Engine", icon = "\U0001f52c", group = "Design"),
+  list(id = "batch",    label = "Panel Runner",       icon = "\U0001f5c2", group = "Design"),
   list(id = "plasmid",  label = "Plasmid Creator",    icon = "\U0001f504", group = "Design"),
   list(id = "pcr",      label = "PCR Setup",          icon = "\U0001f9ea", group = "Design"),
   list(id = "qpcr",     label = "qPCR (ddCt)",        icon = "\U0001f4c9", group = "Analysis"),
@@ -76,6 +78,7 @@ TOOL_ABOUT <- list(
   extractor = "Pulls real exon and intron sequence for a chosen transcript, exports BED/FASTA/CSV/JSON/GTF, and hands a chosen exon straight to the Primer Designer -- no manual coordinate copying.",
   design  = "Designs a junction-spanning primer pair against live reference sequence and shows the expected canonical vs. cryptic-exon product sizes.",
   cryptic = "Reads control vs. knockdown BAMs over a locus and screens for all four recognized types of splicing defect -- cryptic exon inclusion, cryptic splice site selection, exitrons, and intron retention -- via an IGV-style sashimi plot without leaving the app.",
+  batch   = "Runs the Cryptic Splicing Engine's full detection across a whole list of genes/loci against one BAM pair, returning a row-per-locus summary. Click any row to open that locus in the engine.",
   plasmid = "Joins your parts end-to-end, circularizes them, and draws the resulting map.",
   pcr     = "Scales stock/final concentrations into a master mix for N reactions plus excess.",
   qpcr    = "Calculates ΔΔCt relative expression against a chosen calibrator sample.",
@@ -88,7 +91,8 @@ TOOL_ABOUT <- list(
 )
 TOOL_RELATED <- list(
   explorer = c("extractor", "design"), extractor = c("design", "explorer"),
-  design = c("extractor", "cryptic", "plasmid"), cryptic = c("design", "pcr"),
+  design = c("extractor", "cryptic", "plasmid"), cryptic = c("design", "batch"),
+  batch = c("cryptic", "design"),
   plasmid = c("design", "pcr"), pcr = c("design", "qpcr"),
   qpcr = c("dens", "sc"), dens = c("norm", "sc"), sc = c("norm", "a280"),
   norm = c("a280", "dil"), a280 = c("pp", "dil"), pp = c("a280", "dil"), dil = c("pcr", "norm")
@@ -241,6 +245,32 @@ panel_cryptic <- function() {
         actionButton("cryptic_go", "Run detection", class = "btn-run"))
     ),
     div(uiOutput("cryptic_out"))
+  )
+}
+
+# ------------------------------------------------------------- PANEL: PANEL RUNNER
+panel_batch <- function() {
+  layout_columns(col_widths = c(4, 8),
+    div(
+      l2b_card(1, "Loci", "One gene symbol or chr:start-end locus per line (commas/semicolons also work). Paste your whole reference panel here -- e.g. UNC13A, STMN2, POLG, ...",
+        textAreaInput("batch_loci", NULL, rows = 8, resize = "vertical",
+                      value = "UNC13A\nSTMN2\nUFD1L\nPOLG",
+                      placeholder = "UNC13A\nSTMN2\nchr9:135,801,000-135,810,000"),
+        selectInput("batch_assembly", "Assembly", choices = c("hg38", "hg19"), selected = "hg38")),
+      l2b_card(2, "BAM pair", "One control + one knockdown set, shared across every locus. One path per line, or comma-separated; globs (/data/ctrl_*.bam) and ~ work.",
+        textAreaInput("batch_control_paths", "Control BAM path(s)", rows = 2, resize = "vertical",
+                      placeholder = "/path/to/SCR_DMSO.bam"),
+        textAreaInput("batch_kd_paths", "Knockdown BAM path(s)", rows = 2, resize = "vertical",
+                      placeholder = "/path/to/TDP43KD_11j.bam")),
+      l2b_card(3, "Detection thresholds", "Same detection as the single-locus engine -- these apply to every locus in the run.",
+        fluidRow(column(6, numericInput("batch_min_kd_reads", "Min KD reads", value = 3, min = 1)),
+                 column(6, numericInput("batch_max_ctrl_reads", "Max control reads", value = 1, min = 0))),
+        fluidRow(column(6, numericInput("batch_exon_min", "Min candidate exon (bp)", value = 20, min = 1)),
+                 column(6, numericInput("batch_exon_max", "Max candidate exon (bp)", value = 400, min = 1))),
+        br(),
+        actionButton("batch_go", "Run panel", class = "btn-run"))
+    ),
+    div(uiOutput("batch_out"))
   )
 }
 
@@ -402,6 +432,7 @@ ui <- page_fluid(
         tabPanel("extractor", panel_extractor()),
         tabPanel("design", panel_design()),
         tabPanel("cryptic", panel_cryptic()),
+        tabPanel("batch", panel_batch()),
         tabPanel("plasmid", panel_plasmid()),
         tabPanel("pcr", panel_pcr()),
         tabPanel("qpcr", panel_qpcr()),
@@ -1260,6 +1291,107 @@ server <- function(input, output, session) {
     }
   })
 
+  # ---- PANEL RUNNER ----
+  # Reuses cryptic_cache (defined in the CRYPTIC block above) so reads shared
+  # between a batch run and a later single-locus open aren't paid for twice,
+  # and a clicked row can hand its already-computed result straight to the
+  # engine view without recomputing.
+  batch_res <- reactiveVal(NULL); batch_err <- reactiveVal(NULL)
+
+  observeEvent(input$batch_go, {
+    batch_err(NULL); batch_res(NULL)
+    tryCatch({
+      control_bams <- resolve_local_bams(input$batch_control_paths, "control")
+      kd_bams <- resolve_local_bams(input$batch_kd_paths, "knockdown")
+      thresholds <- list(min_kd_reads = input$batch_min_kd_reads,
+                         max_control_reads = input$batch_max_ctrl_reads,
+                         exon_min = input$batch_exon_min, exon_max = input$batch_exon_max)
+      loci <- parse_loci_list(input$batch_loci)
+      if (length(loci) == 0) stop("Enter at least one gene symbol or locus (one per line).")
+      withProgress(message = "Running panel...", value = 0, {
+        res <- run_batch_loci(input$batch_loci, control_bams, kd_bams, input$batch_assembly,
+                              thresholds, cryptic_cache,
+                              progress = function(frac, detail) setProgress(value = frac, detail = detail))
+        res$assembly <- input$batch_assembly
+        res$bam_info <- list(control = control_bams, kd = kd_bams, assembly = input$batch_assembly)
+        batch_res(res)
+      })
+    }, error = function(e) batch_err(conditionMessage(e)))
+  })
+
+  output$batch_out <- renderUI({
+    if (!is.null(batch_err())) return(div(class = "l2b-card", l2b_err(batch_err())))
+    if (is.null(batch_res())) return(div(class = "l2b-card",
+      l2b_empty("\U0001f5c2", "No panel run yet",
+                "Paste a list of genes/loci, point at one control + knockdown BAM pair, and click Run panel.")))
+    s <- batch_res()$summary
+    n_hit <- sum(s$status == "hit"); n_err <- sum(s$status == "error")
+    div(class = "l2b-card",
+      l2b_hero(
+        l2b_stat("Loci", nrow(s), "in this panel"),
+        l2b_stat("With signal", n_hit, "cryptic event(s) found", if (n_hit > 0) "accent" else ""),
+        l2b_stat("Clear", sum(s$status == "clear"), "nothing above threshold", "good"),
+        l2b_stat("Errors", n_err, "couldn't resolve/read", if (n_err > 0) "bad" else "good")
+      ),
+      p(class = "l2b-card-sub",
+        "One row per locus. Click a row to open it in the Cryptic Splicing Engine — the reads are already cached, so it opens instantly."),
+      DTOutput("batch_tbl"),
+      div(style = "margin-top:12px;",
+        downloadButton("batch_download_csv", "Download summary (CSV)", class = "btn-dl"))
+    )
+  })
+
+  output$batch_tbl <- renderDT({
+    req(batch_res())
+    s <- batch_res()$summary
+    out <- data.frame(
+      Locus = s$locus,
+      Region = ifelse(is.na(s$region), "—", s$region),
+      `Cryptic exons` = ifelse(is.na(s$cryptic_exons), "—", as.character(s$cryptic_exons)),
+      `Novel junc.` = ifelse(is.na(s$novel_junctions), "—", as.character(s$novel_junctions)),
+      Exitrons = ifelse(is.na(s$exitrons), "—", as.character(s$exitrons)),
+      `Retained introns` = ifelse(is.na(s$retained_introns), "—", as.character(s$retained_introns)),
+      `Min q` = ifelse(is.na(s$min_q), "—", format(s$min_q, digits = 2, scientific = TRUE)),
+      Finding = ifelse(s$status == "error", paste("Error:", s$error), s$headline),
+      .status = s$status,
+      check.names = FALSE)
+    status_col <- ncol(out) - 1L   # 0-indexed position of the hidden .status column
+    dt <- datatable(out, rownames = FALSE, selection = "single",
+                    options = list(dom = "t", paging = FALSE, ordering = TRUE,
+                                   columnDefs = list(list(visible = FALSE, targets = status_col))))
+    # colour the whole row by status, reading the hidden .status column:
+    # hit (accent tint), clear (untinted), error (red tint)
+    DT::formatStyle(dt, columns = "Locus", valueColumns = ".status", target = "row",
+      backgroundColor = DT::styleEqual(
+        c("hit", "clear", "error"),
+        c("rgba(124,108,240,0.10)", "transparent", "rgba(242,85,91,0.10)")))
+  }, server = TRUE)
+
+  # click a row -> hand that locus's already-computed result to the engine view
+  observeEvent(input$batch_tbl_rows_selected, {
+    req(batch_res())
+    sel <- input$batch_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) return(invisible())
+    br <- batch_res()
+    res <- br$results[[sel]]
+    if (is.null(res)) {
+      batch_err(sprintf("'%s' failed in the panel run — nothing to open. (%s)",
+                        br$summary$locus[sel], br$summary$error[sel] %||% "unknown error"))
+      return(invisible())
+    }
+    cryptic_err(NULL)
+    cryptic_bam_info(list(control = br$bam_info$control, kd = br$bam_info$kd, assembly = br$assembly))
+    cryptic_res(res)
+    cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
+    updateSelectInput(session, "cryptic_assembly", selected = br$assembly)
+    updateTextInput(session, "cryptic_locus", value = res$label)
+    updateTabsetPanel(session, "tool_tabs", selected = "cryptic")
+  })
+
+  output$batch_download_csv <- downloadHandler(
+    filename = function() "panel_run_summary.csv",
+    content = function(f) write.csv(batch_res()$summary, f, row.names = FALSE))
+
   # ---- qPCR ----
   output$qpcr_calib <- renderUI({
     ch <- qpcr_grid()$Sample
@@ -1661,6 +1793,9 @@ server <- function(input, output, session) {
         sprintf("%s bp plasmid assembled (%d parts)", format(r$total_length, big.mark = ","), nrow(r$features))),
       pcr = status_row(pcr_res(), pcr_err(), function(r)
         sprintf("Master mix for %d reaction(s) ready", r$num_reactions)),
+      batch = status_row(batch_res(), batch_err(), function(r)
+        sprintf("%d locus/loci scanned, %d with signal",
+                nrow(r$summary), sum(r$summary$status == "hit"))),
       qpcr = status_row(qpcr_res(), qpcr_err(), function(r)
         sprintf("%d sample(s) analyzed vs. %s", nrow(r$samples), r$calibrator)),
       dens = status_row(dens_res(), dens_err(), function(r)
