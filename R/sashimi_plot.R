@@ -505,9 +505,10 @@ SASHIMI_JS <- "
       t = document.createElement('div');
       t.id = 'l2b-sashimi-tooltip';
       t.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;display:none;' +
-        'background:var(--l2b-surface,#12172a);color:var(--l2b-text,#e9ecf5);' +
-        'border:1px solid var(--l2b-border,#232a42);border-radius:8px;padding:8px 11px;' +
-        'font-size:12.5px;line-height:1.5;box-shadow:0 6px 20px rgba(0,0,0,.35);max-width:260px;';
+        'background:var(--l2b-glass,rgba(23,28,48,.72));color:var(--l2b-text,#e9ecf5);' +
+        'backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);' +
+        'border:1px solid var(--l2b-glass-border,rgba(174,182,230,.14));border-radius:10px;padding:8px 11px;' +
+        'font-size:12.5px;line-height:1.5;box-shadow:0 8px 26px rgba(0,0,0,.4),inset 0 1px 0 var(--l2b-glass-highlight,rgba(255,255,255,.09));max-width:260px;';
       document.body.appendChild(t);
     }
     return t;

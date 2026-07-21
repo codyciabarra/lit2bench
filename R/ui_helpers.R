@@ -158,10 +158,12 @@ L2B_CSS <- "
     box-shadow:inset 3px 0 0 var(--l2b-accent), inset 0 1px 0 var(--l2b-glass-highlight); }
 
   /* ================= RIGHT RAIL / ASIDE ================= */
-  .l2b-aside-card { background:var(--l2b-glass); backdrop-filter:blur(22px) saturate(160%);
+  .l2b-aside-card { position:relative; background:var(--l2b-glass); backdrop-filter:blur(22px) saturate(160%);
     -webkit-backdrop-filter:blur(22px) saturate(160%); border:1px solid var(--l2b-glass-border);
     border-radius:16px; padding:18px; margin-bottom:16px;
     box-shadow:var(--l2b-shadow), inset 0 1px 0 var(--l2b-glass-highlight); }
+  /* keep real content above the ::before sheen without needing z-index juggling */
+  .l2b-aside-card > *, .l2b-nav > *, .l2b-card > * { position:relative; }
   .l2b-aside-title { font-size:11px; font-weight:800; letter-spacing:.09em; text-transform:uppercase;
     color:var(--l2b-text-faint); margin:0 0 12px; }
   .l2b-aside-row { display:flex; align-items:flex-start; gap:9px; font-size:13.5px; color:var(--l2b-text);
@@ -220,10 +222,19 @@ L2B_CSS <- "
      Glass material + a hairline top sheen (inset highlight) so the card
      reads as a lit pane of glass, not a flat rectangle -- the layout/grid
      is unchanged, only the material. */
-  .l2b-card { background:var(--l2b-glass); backdrop-filter:blur(22px) saturate(160%);
+  .l2b-card { position:relative; background:var(--l2b-glass); backdrop-filter:blur(22px) saturate(160%);
     -webkit-backdrop-filter:blur(22px) saturate(160%); border:1px solid var(--l2b-glass-border);
     border-radius:16px; box-shadow:var(--l2b-shadow), inset 0 1px 0 var(--l2b-glass-highlight);
     padding:20px 22px; margin-bottom:18px; }
+  /* Specular reflection -- a soft diagonal light wash catching the top-left
+     corner and fading out, the way light glances off a real pane of glass.
+     Behind the card's own content (child elements paint above ::before) and
+     click-through, so it's pure surface sheen. */
+  .l2b-card::before, .l2b-aside-card::before, .l2b-nav::before {
+    content:''; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+    background:linear-gradient(135deg, var(--l2b-glass-highlight), transparent 26%),
+               radial-gradient(120% 80% at 100% 0%, var(--l2b-glass-highlight), transparent 42%);
+    opacity:.45; mix-blend-mode:screen; }
   .l2b-card-title { font-size:12px; font-weight:800; letter-spacing:.09em; text-transform:uppercase;
     color:var(--l2b-accent-text); margin:0 0 4px; display:flex; align-items:center; gap:8px; }
   .l2b-card-sub { color:var(--l2b-text-muted); font-size:13.5px; margin:0 0 16px; }
@@ -284,7 +295,8 @@ L2B_CSS <- "
   }
 
   /* ================= MESSAGES ================= */
-  .l2b-warn { background:var(--l2b-secondary-soft); border-left:4px solid var(--l2b-secondary); border-radius:9px;
+  .l2b-warn { background:var(--l2b-secondary-soft); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border-left:4px solid var(--l2b-secondary); border-radius:9px;
     padding:11px 15px; margin-top:16px; color:var(--l2b-text); font-size:13px; }
   .l2b-err { background:var(--l2b-danger-soft); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
     border-left:4px solid var(--l2b-danger); border-radius:9px;
@@ -337,21 +349,27 @@ L2B_CSS <- "
     { outline:none; box-shadow:0 0 0 3px var(--l2b-accent-soft); }
   .radio label, .checkbox label, .form-check label { display:flex; align-items:center; cursor:pointer; }
   .form-check-label { color:var(--l2b-text) !important; }
-  .selectize-dropdown, .selectize-dropdown-content { background:var(--l2b-surface) !important;
-    color:var(--l2b-text) !important; border-color:var(--l2b-border-strong) !important; }
+  .selectize-dropdown, .selectize-dropdown-content { background:var(--l2b-glass) !important;
+    backdrop-filter:blur(20px) saturate(160%); -webkit-backdrop-filter:blur(20px) saturate(160%);
+    color:var(--l2b-text) !important; border:1px solid var(--l2b-glass-border) !important;
+    box-shadow:var(--l2b-shadow), inset 0 1px 0 var(--l2b-glass-highlight) !important; }
   .selectize-dropdown .option { color:var(--l2b-text) !important; }
   .selectize-dropdown .active { background:var(--l2b-accent-soft) !important; color:var(--l2b-accent-text) !important; }
   .selectize-input.focus { border-color:var(--l2b-accent) !important; box-shadow:0 0 0 3px var(--l2b-accent-soft) !important; }
   .selectize-control.single .selectize-input:after { border-color:var(--l2b-text-faint) transparent transparent transparent !important; }
 
-  /* ================= DT ================= */
-  table.dataTable thead th { background:var(--l2b-surface-2) !important; color:var(--l2b-text-muted) !important;
-    font-weight:700 !important; border:none !important; border-bottom:1px solid var(--l2b-border) !important;
+  /* ================= DT =================
+     Rows are transparent so the card's glass + the page's colour glow show
+     through the table -- it reads as data floating on the same pane rather
+     than an opaque panel dropped on top. Header is its own frosted strip. */
+  table.dataTable thead th { background:var(--l2b-glass-2) !important; color:var(--l2b-text-muted) !important;
+    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+    font-weight:700 !important; border:none !important; border-bottom:1px solid var(--l2b-glass-border) !important;
     font-size:11.5px !important; text-transform:uppercase; letter-spacing:.05em; }
   table.dataTable tbody td { padding:9px 13px !important; font-size:14px; color:var(--l2b-text) !important;
-    background:transparent !important; border-color:var(--l2b-border) !important; }
-  table.dataTable tbody tr { background:var(--l2b-surface) !important; }
-  table.dataTable tbody tr:hover td { background:var(--l2b-surface-hover) !important; }
+    background:transparent !important; border-color:var(--l2b-glass-border) !important; }
+  table.dataTable tbody tr { background:transparent !important; }
+  table.dataTable tbody tr:hover td { background:var(--l2b-glass-2) !important; }
   table.dataTable.no-footer { border-bottom:1px solid var(--l2b-border) !important; }
   /* A wide column (e.g. Plasmid Creator's raw sequence text) would otherwise
      overflow the card's fixed width with no way to see the rest of it --
