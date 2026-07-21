@@ -989,7 +989,9 @@ server <- function(input, output, session) {
           if (length(p) > 1) l2b_stat("Size shift", sprintf("+%d bp", p[[2]]$size - p[[1]]$size), "detectable on one gel")
         ),
         tags$iframe(srcdoc = design_html(),
-                    style = "width:100%; height:1650px; border:1px solid var(--l2b-border); border-radius:10px;")
+                    style = "width:100%; height:1650px; border:1px solid var(--l2b-border); border-radius:10px;"),
+        div(style = "margin-top:12px;",
+          actionButton("design_to_pcr_main", "\U0001f9ea Set up PCR for this pair →", class = "btn-alt", style = "width:auto;"))
       ),
       if (!is.null(a$cryptic_specific)) {
         cs <- a$cryptic_specific
@@ -1004,13 +1006,16 @@ server <- function(input, output, session) {
           if (!is.null(cs$error)) l2b_warn(paste0(
             "Couldn't design a cryptic-specific pair here: ", cs$error,
             " The inclusion assay above is unaffected."))
-          else l2b_result_table(data.frame(
-            Primer = c(sprintf("FWD (%s)", cs$fwd_binds), sprintf("REV (%s)", cs$rev_binds)),
-            Sequence = c(cs$fwd_seq, cs$rev_seq),
-            Tm = sprintf("%s °C", c(cs$fwd_tm, cs$rev_tm)),
-            GC = sprintf("%s%%", c(cs$fwd_gc, cs$rev_gc)),
-            `Product` = c(sprintf("%d bp (cryptic only)", cs$product_size), ""),
-            check.names = FALSE))
+          else tagList(
+            l2b_result_table(data.frame(
+              Primer = c(sprintf("FWD (%s)", cs$fwd_binds), sprintf("REV (%s)", cs$rev_binds)),
+              Sequence = c(cs$fwd_seq, cs$rev_seq),
+              Tm = sprintf("%s °C", c(cs$fwd_tm, cs$rev_tm)),
+              GC = sprintf("%s%%", c(cs$fwd_gc, cs$rev_gc)),
+              `Product` = c(sprintf("%d bp (cryptic only)", cs$product_size), ""),
+              check.names = FALSE)),
+            div(style = "margin-top:10px;",
+              actionButton("design_to_pcr_cryptic", "\U0001f9ea Set up PCR for the cryptic-specific pair →", class = "btn-alt", style = "width:auto;")))
         )
       }
     )
@@ -1022,6 +1027,34 @@ server <- function(input, output, session) {
   output$download_html <- downloadHandler(
     filename = function() sprintf("%s_schematic.html", gsub("[^A-Za-z0-9]", "_", input$gene)),
     content = function(f) writeLines(build_html(design_res(), dark = FALSE), f))
+
+  # -- hand a designed primer pair to the PCR Setup master-mix calculator --
+  # carries the actual sequences + expected product size as a provenance note
+  # shown in the PCR panel, and pre-fills the pooled-component grid so the two
+  # primers don't have to be re-entered.
+  pcr_provenance <- reactiveVal(NULL)
+  handoff_to_pcr <- function(label, fwd_seq, rev_seq, product_size) {
+    df <- data.frame(
+      Component = c("2X Master Mix", "FWD primer", "REV primer"),
+      `Stock conc` = c(2, 10, 10), `Final conc` = c(1, 0.5, 0.5),
+      check.names = FALSE, stringsAsFactors = FALSE)
+    pcr_pool_grid(df)
+    DT::replaceData(DT::dataTableProxy("pcr_pool_g"), df, resetPaging = FALSE, rownames = FALSE)
+    pcr_provenance(list(label = label, fwd = fwd_seq, rev = rev_seq, size = product_size,
+                        gene = trimws(input$gene)))
+    updateTabsetPanel(session, "tool_tabs", selected = "pcr")
+  }
+  observeEvent(input$design_to_pcr_main, {
+    req(design_res()); a <- design_res()
+    handoff_to_pcr(sprintf("%s inclusion assay", a$gene %||% "primer"),
+                   a$primers$fwd$seq, a$primers$rev$seq, a$products[[1]]$size)
+  })
+  observeEvent(input$design_to_pcr_cryptic, {
+    req(design_res()); cs <- design_res()$cryptic_specific
+    req(!is.null(cs), is.null(cs$error))
+    handoff_to_pcr(sprintf("%s cryptic-specific assay", design_res()$gene %||% "primer"),
+                   cs$fwd_seq, cs$rev_seq, cs$product_size)
+  })
 
   design_aside <- function() {
     a <- design_res()
@@ -1837,20 +1870,32 @@ server <- function(input, output, session) {
     if (inherits(out, "error")) pcr_err(conditionMessage(out)) else pcr_res(out)
   })
   output$pcr_out <- renderUI({
-    if (!is.null(pcr_err())) return(div(class = "l2b-card", l2b_err(pcr_err())))
-    if (is.null(pcr_res())) return(div(class = "l2b-card", l2b_empty("\U0001f9ea", "No mix yet", "Enter components and click Calculate.")))
-    r <- pcr_res()
-    total_mm <- sum(r$components$vol_master_mix_uL, na.rm = TRUE) + r$water_master_mix_uL
-    div(class = "l2b-card",
-      div(class = "l2b-card-title", "Master mix"),
-      l2b_hero(
-        l2b_stat("Reactions", r$num_reactions, sprintf("+%.0f%% excess", (r$excess_fold - 1) * 100)),
-        l2b_stat("Per reaction", sprintf("%.1f µL", r$final_volume_uL), "final volume"),
-        l2b_stat("Total mix", sprintf("%.1f µL", total_mm), "prepare this much", "accent")
-      ),
-      DTOutput("pcr_tbl"),
-      l2b_warn(r$warnings)
-    )
+    prov <- pcr_provenance()
+    prov_card <- if (!is.null(prov)) div(class = "l2b-card",
+      div(class = "l2b-card-title", sprintf("\U0001f9ec From design: %s", prov$label)),
+      p(class = "l2b-card-sub",
+        sprintf("Primers pre-loaded below. Expected product: %d bp. Set your reaction volume and count, then Calculate.", prov$size)),
+      l2b_result_table(data.frame(
+        Primer = c("FWD", "REV"), Sequence = c(prov$fwd, prov$rev),
+        `Length (nt)` = c(nchar(prov$fwd), nchar(prov$rev)), check.names = FALSE)))
+
+    body <- if (!is.null(pcr_err())) div(class = "l2b-card", l2b_err(pcr_err()))
+      else if (is.null(pcr_res())) div(class = "l2b-card", l2b_empty("\U0001f9ea", "No mix yet", "Enter components and click Calculate."))
+      else {
+        r <- pcr_res()
+        total_mm <- sum(r$components$vol_master_mix_uL, na.rm = TRUE) + r$water_master_mix_uL
+        div(class = "l2b-card",
+          div(class = "l2b-card-title", "Master mix"),
+          l2b_hero(
+            l2b_stat("Reactions", r$num_reactions, sprintf("+%.0f%% excess", (r$excess_fold - 1) * 100)),
+            l2b_stat("Per reaction", sprintf("%.1f µL", r$final_volume_uL), "final volume"),
+            l2b_stat("Total mix", sprintf("%.1f µL", total_mm), "prepare this much", "accent")
+          ),
+          DTOutput("pcr_tbl"),
+          l2b_warn(r$warnings)
+        )
+      }
+    tagList(prov_card, body)
   })
   output$pcr_tbl <- renderDT({
     req(pcr_res()); r <- pcr_res(); df <- r$components
