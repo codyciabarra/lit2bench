@@ -500,6 +500,26 @@ known_junctions_from_transcripts <- function(transcripts) {
   unique(df)
 }
 
+#' Every annotated exon (start,end), across every transcript found by
+#' lookup_transcripts_in_region() -- the reference set detect_cryptic_candidates()
+#' checks a junction against to recognize an exitron: a novel junction whose
+#' donor AND acceptor both fall strictly *inside* one real exon's span (as
+#' opposed to at an intron boundary) is the spliceosome treating part of a
+#' normally-coding exon's interior as an intron and removing it -- a real,
+#' separately-named splicing defect (distinct from a shifted splice site,
+#' which keeps one real exon boundary, and from a cassette-exon insertion,
+#' which sits between two real exons), so it needs its own recognition
+#' rather than falling into the generic "novel at both ends" bucket, which
+#' both mislabels it and holds it to a stricter, noise-oriented read
+#' threshold it doesn't deserve.
+known_exons_from_transcripts <- function(transcripts) {
+  empty <- data.frame(start = integer(0), end = integer(0))
+  rows <- lapply(transcripts, function(tx) tx[, c("start", "end")])
+  df <- do.call(rbind, rows)
+  if (is.null(df)) return(empty)
+  unique(df)
+}
+
 .junction_key <- function(df) sprintf("%d-%d", df$start, df$end)
 
 # --------------------------------------------------------------------------
@@ -602,14 +622,24 @@ cached_genomic_seq <- function(cache, chrom, start, end, assembly = "hg38") {
 #'        is still accepted if kd_reads is at least this many times its own
 #'        control_reads -- lets a real, KD-massively-elevated site through
 #'        even when it already has meaningful baseline usage in control.
+#' @param known_exons optional data.frame(start,end) of every annotated exon in
+#'        the window (known_exons_from_transcripts()) -- used to recognize
+#'        exitrons: a junction whose donor AND acceptor both fall strictly
+#'        inside one real exon is a distinct, real splicing-defect class (the
+#'        spliceosome removing part of a normally-coding exon's interior), not
+#'        a misalignment-flavored "novel at both ends" junction, so it's
+#'        treated as anchored (normal read threshold, not the 3x
+#'        unanchored_read_mult bar) rather than lumped in with likely noise.
+#'        NULL skips exitron recognition -- never required to run.
 #' @return list(novel_junctions, candidate_exons) -- two data.frames, each
 #'   carrying `confidence` ("high"/"medium"/"low") alongside the coordinate/
 #'   read-support columns callers already relied on. novel_junctions also
-#'   carries `fold_enrichment` (kd_reads/control_reads, Inf if control-absent)
-#'   and `paired` (TRUE if this junction is one half of a candidate_exons row)
-#'   -- a real but unpaired junction (`paired == FALSE`) is very often a
-#'   single shifted/strengthened splice site rather than a whole new exon,
-#'   and should be surfaced as its own hit, not just read as "not found".
+#'   carries `fold_enrichment` (kd_reads/control_reads, Inf if control-absent),
+#'   `exitron` (both endpoints strictly inside one annotated exon), and
+#'   `paired` (TRUE if this junction is one half of a candidate_exons row) --
+#'   a real but unpaired, non-exitron junction (`paired == FALSE`) is very
+#'   often a single shifted/strengthened splice site rather than a whole new
+#'   exon, and should be surfaced as its own hit, not just read as "not found".
 #'   novel_junctions: individual KD junctions absent from annotation, control-quiet
 #'     (or control-quiet-relative-to-KD, see point 1 above).
 #'   candidate_exons: pairs of novel junctions that share one flanking annotated/
@@ -619,7 +649,8 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                                        min_kd_reads = 3, max_control_reads = 1,
                                        exon_len_range = c(20, 400),
                                        window_seq = NULL, window_seq_start = NULL,
-                                       unanchored_read_mult = 3, min_fold_enrichment = 5) {
+                                       unanchored_read_mult = 3, min_fold_enrichment = 5,
+                                       known_exons = NULL) {
   known_keys <- .junction_key(known_junc)
   known_starts <- unique(known_junc$start)
   known_ends <- unique(known_junc$end)
@@ -655,7 +686,12 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                               unname(ctrl_reads_by_key[kd$key]), 0L)
   kd$anchor_donor <- kd$start %in% anchor_starts
   kd$anchor_acceptor <- kd$end %in% anchor_ends
-  kd$anchored <- kd$anchor_donor | kd$anchor_acceptor
+  kd$exitron <- rep(FALSE, nrow(kd))
+  if (!is.null(known_exons) && nrow(known_exons) > 0 && nrow(kd) > 0) {
+    kd$exitron <- vapply(seq_len(nrow(kd)), function(i)
+      any(known_exons$start < kd$start[i] & kd$end[i] < known_exons$end), logical(1))
+  }
+  kd$anchored <- kd$anchor_donor | kd$anchor_acceptor | kd$exitron
 
   kd$motif_class <- rep(NA_character_, nrow(kd))
   kd$motif_canonical <- rep(NA, nrow(kd))
@@ -687,7 +723,7 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   novel <- novel[order(factor(novel$confidence, levels = c("high", "medium", "low")),
                        -novel$fold_enrichment, -novel$reads),
                  c("start", "end", "reads", "control_reads", "fold_enrichment", "anchor_donor",
-                   "anchor_acceptor", "motif_class", "motif_canonical", "confidence")]
+                   "anchor_acceptor", "exitron", "motif_class", "motif_canonical", "confidence")]
   names(novel)[names(novel) == "reads"] <- "kd_reads"
   rownames(novel) <- NULL
 
@@ -952,11 +988,12 @@ run_cryptic_detection <- function(locus, control_bams, kd_bams, assembly, thresh
   window_seq <- cached_genomic_seq(cache, locus$chrom, locus$start, locus$end, assembly = assembly)
 
   known_junc <- known_junctions_from_transcripts(transcripts)
+  known_exons <- known_exons_from_transcripts(transcripts)
   candidates <- detect_cryptic_candidates(
     control_track$junctions, kd_track$junctions, known_junc,
     min_kd_reads = thresholds$min_kd_reads, max_control_reads = thresholds$max_control_reads,
     exon_len_range = c(thresholds$exon_min, thresholds$exon_max),
-    window_seq = window_seq, window_seq_start = locus$start)
+    window_seq = window_seq, window_seq_start = locus$start, known_exons = known_exons)
   diff_tbl <- differential_splicing_table(control_track$per_replicate, kd_track$per_replicate, known_junc)
   retained_introns <- detect_intron_retention(
     control_track$coverage, kd_track$coverage, locus$start, locus$end, known_junc,

@@ -41,7 +41,8 @@ summarize_cryptic_findings <- function(result) {
     result$chrom, format(nj$start, big.mark = ","), format(nj$end, big.mark = ","),
     nj$kd_reads, nj$control_reads,
     ifelse(is.infinite(nj$fold_enrichment), "inf", sprintf("%.1fx", nj$fold_enrichment)),
-    nj$confidence, ifelse(nj$paired, "part of a candidate exon", "single splice-site shift")),
+    nj$confidence, ifelse(nj$paired, "part of a cryptic exon inclusion",
+                    ifelse(nj$exitron, "exitron", "cryptic splice site selection"))),
     collapse = "\n") else "  - none at the thresholds used"
 
   ce <- result$candidates$candidate_exons
@@ -82,11 +83,12 @@ summarize_cryptic_findings <- function(result) {
     sprintf("Read depth over window: control = %s reads (%d replicate(s)), knockdown = %s reads (%d replicate(s))\n",
             format(result$control$n_reads, big.mark = ","), n_rep_ctrl,
             format(result$knockdown$n_reads, big.mark = ","), n_rep_kd),
-    "Novel splice junctions (present in knockdown, absent from RefSeq annotation, quiet in control):\n",
+    "This engine screens for the four recognized types of TDP-43-associated splicing defect: cryptic exon inclusion, cryptic splice site selection, exitrons, and intron retention.\n",
+    "Novel splice junctions (present in knockdown, absent from RefSeq annotation, quiet in control -- each tagged with which of the four types it looks like: 'cryptic splice site selection' is a dormant donor/acceptor activated near a real one, shortening/lengthening an exon; 'exitron' is a dormant site activated INSIDE a normally-coding exon, splicing out part of its interior; 'part of a cryptic exon inclusion' means it also appears in the next section, paired with another junction bracketing a whole new exon):\n",
     nj_txt, "\n",
-    "Candidate cryptic-exon spans (two novel junctions bracketing a plausibly exon-sized gap):\n",
+    "Cryptic exon inclusion (two novel junctions sharing one real flanking intron, bracketing a plausibly exon-sized gap -- a hidden intronic sequence stitched in as a new exon):\n",
     ce_txt, "\n",
-    "Retained introns (elevated, depth-normalized coverage across an annotated intron in knockdown vs. control -- a different signature from the two above: it never produces a spliced junction, so it can show a real splicing change that the junction-based lists above cannot. TDP-43 loss causes widespread intron retention, so several appearing here is expected and not each necessarily its own distinct cryptic-exon event):\n",
+    "Retained introns (elevated, depth-normalized coverage across an annotated intron in knockdown vs. control -- the splicing machinery failing to excise it. A different signature from the three above: it never produces a spliced junction, so it can show a real splicing change that the junction-based lists above cannot. TDP-43 loss causes widespread intron retention, so several appearing here is expected and not each necessarily its own distinct cryptic-exon event):\n",
     ri_txt, "\n",
     sprintf("Detection thresholds used: %s\n", thr_txt),
     "Confidence tiers: \"high\" = the junction shares its donor or acceptor coordinate with an annotated/heavily-used splice site AND has a canonical (or unknown) splice motif; \"medium\" = anchored but non-canonical motif, or unanchored but canonical motif; \"low\" = shares neither endpoint with anything known/major -- treat low-confidence calls as needing manual verification (e.g. Sanger/RT-PCR), not as established.\n",

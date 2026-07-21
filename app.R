@@ -75,7 +75,7 @@ TOOL_ABOUT <- list(
   explorer = "Search a gene symbol, RefSeq/Ensembl transcript ID, or a locus and see every annotated isoform in the region -- strand, length, coding status, exon/intron counts, CDS and UTR spans.",
   extractor = "Pulls real exon and intron sequence for a chosen transcript, exports BED/FASTA/CSV/JSON/GTF, and hands a chosen exon straight to the Primer Designer -- no manual coordinate copying.",
   design  = "Designs a junction-spanning primer pair against live reference sequence and shows the expected canonical vs. cryptic-exon product sizes.",
-  cryptic = "Reads control vs. knockdown BAMs over a locus and flags splice junctions/exons absent from the reference annotation -- an IGV-style sashimi plot without leaving the app.",
+  cryptic = "Reads control vs. knockdown BAMs over a locus and screens for all four recognized types of splicing defect -- cryptic exon inclusion, cryptic splice site selection, exitrons, and intron retention -- via an IGV-style sashimi plot without leaving the app.",
   plasmid = "Joins your parts end-to-end, circularizes them, and draws the resulting map.",
   pcr     = "Scales stock/final concentrations into a master mix for N reactions plus excess.",
   qpcr    = "Calculates ΔΔCt relative expression against a chosen calibrator sample.",
@@ -1179,7 +1179,8 @@ server <- function(input, output, session) {
       Junction = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
       `KD reads` = df$kd_reads, `Control reads` = df$control_reads,
       Fold = ifelse(is.infinite(df$fold_enrichment), "∞", sprintf("%.1f×", df$fold_enrichment)),
-      Shape = ifelse(df$paired, "Exon insertion", "Single splice-site shift"),
+      Shape = ifelse(df$paired, "Cryptic exon inclusion",
+                     ifelse(df$exitron, "Exitron", "Cryptic splice site selection")),
       `Exons skipped` = ifelse(is.na(df$exons_skipped), "—", df$exons_skipped),
       Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))

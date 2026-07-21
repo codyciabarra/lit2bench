@@ -345,7 +345,8 @@ build_sashimi_html <- function(result, dark = FALSE) {
     result$chrom, format(nj$start[i], big.mark = ","), format(nj$end[i], big.mark = ","),
     nj$kd_reads[i], nj$control_reads[i],
     if (is.infinite(nj$fold_enrichment[i])) "&infin;" else sprintf("%.1f&times;", nj$fold_enrichment[i]),
-    if (isTRUE(nj$paired[i])) "Exon insertion" else "Single splice-site shift"), character(1)), collapse = "") else
+    if (isTRUE(nj$paired[i])) "Cryptic exon inclusion"
+    else if (isTRUE(nj$exitron[i])) "Exitron" else "Cryptic splice site selection"), character(1)), collapse = "") else
     '<tr><td colspan="5" class="none">None found at the current thresholds.</td></tr>'
 
   ce <- result$candidates$candidate_exons
