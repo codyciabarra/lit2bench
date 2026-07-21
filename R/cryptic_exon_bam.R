@@ -695,6 +695,25 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                                        window_seq = NULL, window_seq_start = NULL,
                                        unanchored_read_mult = 3, min_fold_enrichment = 5,
                                        min_fold_enrichment_strong = 3, known_exons = NULL) {
+  empty_nj <- data.frame(start = integer(0), end = integer(0), kd_reads = integer(0),
+                         control_reads = integer(0), fold_enrichment = numeric(0),
+                         anchor_donor = logical(0), anchor_acceptor = logical(0), exitron = logical(0),
+                         motif_class = character(0), motif_canonical = logical(0),
+                         confidence = character(0), paired = logical(0))
+  empty_ce <- data.frame(start = integer(0), end = integer(0), length = integer(0),
+                         kd_reads = integer(0), control_reads = integer(0), confidence = character(0))
+  # No annotated introns in the window => no reference splicing program to call
+  # "cryptic" against. This is not a real gene locus in the splicing sense:
+  # mitochondrial DNA (intronless, polycistronic), single-exon genes, and
+  # intergenic regions all land here. Any "junction" summarizeJunctions()
+  # returns for such a window is an artifact (mis-mapping, NUMTs, circular-
+  # contig reads) -- on chrM's ultra-high coverage these even hit canonical
+  # GT-AG dinucleotides by chance, so a motif check can't filter them. The
+  # honest, non-overfit answer is to report nothing here rather than a flood
+  # of phantom cryptic exons: cryptic splicing is defined relative to the
+  # annotation, and there is none.
+  if (nrow(known_junc) == 0) return(list(novel_junctions = empty_nj, candidate_exons = empty_ce))
+
   known_keys <- .junction_key(known_junc)
   known_starts <- unique(known_junc$start)
   known_ends <- unique(known_junc$end)
@@ -942,7 +961,8 @@ detect_intron_retention <- function(control_rle, kd_rle, win_start, win_end, kno
                                      control_n_reads, kd_n_reads,
                                      known_exons = NULL,
                                      min_intron_len = 30, max_intron_len = 200000,
-                                     min_fold = 3, min_ir_ratio = 0.3, peak_bp = 150) {
+                                     min_fold = 3, min_ir_ratio = 0.3, peak_bp = 150,
+                                     min_abs_cov = 10, max_report = 40) {
   empty <- data.frame(start = integer(0), end = integer(0), length = integer(0),
                        control_cov = numeric(0), kd_cov = numeric(0), fold = numeric(0),
                        confidence = character(0))
@@ -1033,12 +1053,25 @@ detect_intron_retention <- function(control_rle, kd_rle, win_start, win_end, kno
   }
   out$fold <- ifelse(ctrl_score > 0, kd_score / ctrl_score, ifelse(kd_score > 0, Inf, 0))
 
-  keep <- kept_floor & (out$fold >= min_fold | is.infinite(out$fold))
+  # Absolute coverage floor, on top of the relative IR ratio. In a lowly-
+  # expressed gene the exonic denominator is small, so a handful of stray
+  # intronic reads clears the IR ratio while being statistical noise -- TTN
+  # in these neuronal samples produced 87 such "retained introns" at < 10
+  # reads. A real retention/cryptic-exon segment carries meaningful absolute
+  # depth; requiring it cuts the low-coverage noise without touching genuine
+  # events (the verified GALC/TBK1/NBEA segments sit well above this).
+  keep <- kept_floor & out$kd_cov >= min_abs_cov & (out$fold >= min_fold | is.infinite(out$fold))
   out <- out[keep, , drop = FALSE]
   if (nrow(out) == 0) return(empty)
 
   out$confidence <- ifelse(is.infinite(out$fold) | out$fold >= min_fold * 2, "high", "medium")
-  out <- out[order(-ifelse(is.infinite(out$fold), .Machine$double.xmax, out$fold)), ]
+  out <- out[order(-ifelse(is.infinite(out$fold), .Machine$double.xmax, out$fold), -out$kd_cov), ]
+  # Bound the output. TDP-43 loss (or a lowly-expressed multi-intron gene like
+  # TTN) can produce dozens of genuine-or-noise elevated segments; a real
+  # analysis focuses on the strongest, and an unbounded list floods the UI.
+  # Keep the strongest `max_report` by fold then coverage -- a targeted event
+  # always ranks at the top, so nothing of interest is lost.
+  if (nrow(out) > max_report) out <- out[seq_len(max_report), , drop = FALSE]
   rownames(out) <- NULL
   out
 }
@@ -1150,7 +1183,12 @@ run_cryptic_detection <- function(locus, control_bams, kd_bams, assembly, thresh
     min_kd_reads = thresholds$min_kd_reads, max_control_reads = thresholds$max_control_reads,
     exon_len_range = c(thresholds$exon_min, thresholds$exon_max),
     window_seq = window_seq, window_seq_start = locus$start, known_exons = known_exons)
-  diff_tbl <- differential_splicing_table(control_track$per_replicate, kd_track$per_replicate, known_junc)
+  # Differential splicing, like the cryptic calls above, is meaningless without
+  # a reference splicing program: with no annotated introns (chrM, single-exon,
+  # intergenic) every "junction" is an artifact, so skip it rather than report
+  # PSI shifts among noise.
+  diff_tbl <- if (nrow(known_junc) == 0) differential_splicing_table(list(), list(), known_junc)
+              else differential_splicing_table(control_track$per_replicate, kd_track$per_replicate, known_junc)
   retained_introns <- detect_intron_retention(
     control_track$coverage_rle, kd_track$coverage_rle, locus$start, locus$end, known_junc,
     control_n_reads = control_track$n_reads, kd_n_reads = kd_track$n_reads,
