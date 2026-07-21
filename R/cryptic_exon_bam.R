@@ -110,18 +110,34 @@ parse_locus_input <- function(text, assembly = "hg38", timeout_s = 15) {
       "Couldn't resolve '%s' to a locus via UCSC gene/transcript search. If this symbol has been renamed (check genenames.org), try its current HGNC symbol, or enter a literal locus instead (e.g. chr19:17,600,000-17,660,000).",
       gene))
   }
-  # Among whichever tier(s) matched, prefer a record UCSC itself flags
-  # canonical ("canonical": true) over just taking the first hit in API
-  # response order -- multiple RefSeq mRNA versions for one gene symbol can
-  # have meaningfully different overall gene-body spans (alternate first/
-  # last exons, UTR extensions across annotation releases, or -- as above --
-  # an entirely superseded symbol), and the first one returned is not
-  # reliably the most complete/current one. Only changes anything when a
-  # canonical option actually exists among the matches; otherwise identical
-  # to the previous first-match behavior.
+  # Among whichever tier(s) matched, choose the record that gives the most
+  # complete gene body:
+  #   1. prefer one UCSC itself flags canonical ("canonical": true); else
+  #   2. the WIDEST-span record.
+  # Multiple RefSeq mRNA versions for one gene symbol routinely have
+  # different overall spans (alternate first/last exons, UTR extensions
+  # across annotation releases), and "first in API response order" is not
+  # reliably the most complete -- measured directly: UFD1L's first
+  # exact-symbol hit is a truncated 13.7 kb record that MISSES the reference
+  # exon, while six other same-gene records span 25-29 kb and contain it.
+  # Widest is the safe bias: a window that's slightly too wide still detects
+  # (the primary-transcript picker in build_cryptic_result() selects the
+  # right isoform for the gene track), whereas one that's too narrow silently
+  # drops the region of interest entirely. Only the non-canonical fallback
+  # changed -- a gene with a canonical record (e.g. POLG) is unaffected.
   cand_idx <- which(ok)
+  span_of <- function(r) {
+    pm <- regmatches(r, regexec('"position"\\s*:\\s*"chr[0-9XYMT]+:([0-9]+)-([0-9]+)"', r, ignore.case = TRUE))[[1]]
+    if (length(pm) != 3) return(-1L)
+    as.integer(pm[3]) - as.integer(pm[2])
+  }
   canonical <- vapply(recs[cand_idx], function(r) grepl('"canonical"\\s*:\\s*true', r), logical(1))
-  rec <- if (any(canonical)) recs[cand_idx[which(canonical)[1]]] else recs[cand_idx[1]]
+  rec <- if (any(canonical)) {
+    recs[cand_idx[which(canonical)[1]]]
+  } else {
+    spans <- vapply(recs[cand_idx], span_of, integer(1))
+    recs[cand_idx[which.max(spans)]]
+  }
   posm <- regmatches(rec, regexpr('"position"\\s*:\\s*"([^"]*)"', rec))
   pos <- sub('.*"position"\\s*:\\s*"([^"]*)".*', "\\1", posm)
   pm <- regmatches(pos, regexec("^(chr[0-9XYMT]+):([0-9]+)-([0-9]+)$", pos, ignore.case = TRUE))[[1]]
