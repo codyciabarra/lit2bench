@@ -711,8 +711,15 @@ server <- function(input, output, session) {
   # within the target region itself (a plain, non-junction primer) instead of
   # failing; ce_lengths comes back empty in that case since there's nothing
   # being included/excluded, just one splice junction to confirm.
-  run_design_handoff <- function(tx_info, assembly, target_start, target_end, target_label, err_setter) {
+  # set by a handoff that targets a genuine cryptic EXON (known span), NULL for
+  # junctions/annotated exons -- lets Generate additionally design a
+  # cryptic-specific primer pair (one foot inside the novel exon).
+  design_ce_coords <- reactiveVal(NULL)
+
+  run_design_handoff <- function(tx_info, assembly, target_start, target_end, target_label, err_setter,
+                                 cryptic_exon = NULL) {
     err_setter(NULL)
+    design_ce_coords(cryptic_exon)
     tx <- tx_info$tx
     flanks <- pick_flanking_exons(tx, target_start, target_end, strand = tx$strand[1])
 
@@ -823,7 +830,7 @@ server <- function(input, output, session) {
     tx <- cryptic_res()$transcript
     run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
                         input$cryptic_assembly, df$start, df$end, "Candidate cryptic exon",
-                        cryptic_err)
+                        cryptic_err, cryptic_exon = list(start = df$start, end = df$end))
   })
 
   # -- same hand-off, triggered by clicking "Design primers for this ->" inside
@@ -839,9 +846,12 @@ server <- function(input, output, session) {
     label <- if (identical(tgt$kind, "annotated_exon")) (tgt$name %||% "Exon")
       else if (identical(tgt$kind, "exon")) "Candidate cryptic exon"
       else sprintf("Novel junction %s:%d-%d", cryptic_res()$chrom, as.integer(tgt$start), as.integer(tgt$end))
+    # only a candidate cryptic exon (kind == "exon") carries a true exon span to
+    # anchor a cryptic-specific primer in; junctions/annotated exons don't
+    ce <- if (identical(tgt$kind, "exon")) list(start = as.integer(tgt$start), end = as.integer(tgt$end)) else NULL
     run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
                         input$cryptic_assembly, as.integer(tgt$start), as.integer(tgt$end), label,
-                        cryptic_err)
+                        cryptic_err, cryptic_exon = ce)
   })
 
   # ---- DESIGN ----
@@ -903,6 +913,15 @@ server <- function(input, output, session) {
     if (input$up_start >= input$up_end || input$dn_start >= input$dn_end) {
       design_err("Exon start must come before its end."); return(invisible()) }
     product_range <- if (identical(input$primer_mode, "qpcr")) QPCR_PRODUCT_SIZE_RANGE else DEFAULT_PRODUCT_SIZE_RANGE
+    # apply the handed-off cryptic-exon span only if it's still consistent with
+    # the CE length shown in the form -- guards against a stale span lingering
+    # after the user manually retargets the design to something else
+    ce_coords <- design_ce_coords()
+    ce_apply <- NULL
+    if (!is.null(ce_coords)) {
+      ce_len <- ce_coords$end - ce_coords$start + 1
+      if (any(round(ce) == ce_len)) ce_apply <- ce_coords
+    }
     withProgress(message = "Designing primers...", value = 0.3, {
       tryCatch({
         incProgress(0.3, detail = "fetching reference sequence")
@@ -913,7 +932,8 @@ server <- function(input, output, session) {
           downstream_exon = list(name = trimws(input$dn_name), start = input$dn_start, end = input$dn_end),
           ce_lengths = ce, citation = trimws(input$citation), doi = trimws(input$doi), flank = input$flank,
           product_size_range = product_range,
-          factor = if (nzchar(trimws(input$factor))) trimws(input$factor) else "TDP-43")
+          factor = if (nzchar(trimws(input$factor))) trimws(input$factor) else "TDP-43",
+          cryptic_exon = ce_apply)
         incProgress(0.4, detail = "building figure")
         design_res(assay)
         goto_design_step(4)
@@ -942,7 +962,29 @@ server <- function(input, output, session) {
         ),
         tags$iframe(srcdoc = design_html(),
                     style = "width:100%; height:1650px; border:1px solid var(--l2b-border); border-radius:10px;")
-      )
+      ),
+      if (!is.null(a$cryptic_specific)) {
+        cs <- a$cryptic_specific
+        div(class = "l2b-card",
+          div(class = "l2b-card-title", "\U0001f3af Cryptic-specific validation pair"),
+          p(class = "l2b-card-sub",
+            HTML(paste0(
+              "The pair above is an <b>inclusion assay</b> — one product, two sizes, both isoforms on one gel. ",
+              "This second pair anchors one primer <b>inside the cryptic exon</b> (", cs$ce_coord,
+              "), so its product can only form when the cryptic exon is included — a clean yes/no band ",
+              "for RT-PCR/qPCR validation. Both primers listed 5′→3′."))),
+          if (!is.null(cs$error)) l2b_warn(paste0(
+            "Couldn't design a cryptic-specific pair here: ", cs$error,
+            " The inclusion assay above is unaffected."))
+          else l2b_result_table(data.frame(
+            Primer = c(sprintf("FWD (%s)", cs$fwd_binds), sprintf("REV (%s)", cs$rev_binds)),
+            Sequence = c(cs$fwd_seq, cs$rev_seq),
+            Tm = sprintf("%s °C", c(cs$fwd_tm, cs$rev_tm)),
+            GC = sprintf("%s%%", c(cs$fwd_gc, cs$rev_gc)),
+            `Product` = c(sprintf("%d bp (cryptic only)", cs$product_size), ""),
+            check.names = FALSE))
+        )
+      }
     )
   })
   output$download_ui <- renderUI({

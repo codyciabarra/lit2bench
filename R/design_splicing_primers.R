@@ -565,6 +565,28 @@ build_assay <- function(meta, primers, features, canonical_size, ce_lengths, geo
 }
 
 # --------------------------------------------------------------------------
+# Cryptic-SPECIFIC pair: one primer in the upstream real exon, the other inside
+# the cryptic exon, product spanning that junction. Reuses design_junction_primers
+# verbatim -- the "downstream" side is just the cryptic exon's own sequence
+# instead of the next real exon -- so a product can only form when the cryptic
+# exon is present. Returns a compact list for display, or NULL if it can't be
+# designed (too little CE sequence, primer3 finds no pair, etc.) with $error set.
+# --------------------------------------------------------------------------
+.design_cryptic_specific <- function(upstream_seq, ce_seq, upstream_name,
+                                     product_size_range = QPCR_PRODUCT_SIZE_RANGE) {
+  tryCatch({
+    p <- design_junction_primers(upstream_seq, ce_seq, product_size_range = product_size_range)
+    list(
+      fwd_seq = p$fwd_seq, rev_seq = p$rev_seq,
+      fwd_tm = p$fwd_tm, rev_tm = p$rev_tm, fwd_gc = p$fwd_gc, rev_gc = p$rev_gc,
+      product_size = p$canonical_size,   # spans upstream->CE junction
+      pair_any_th = p$pair_any_th, pair_end_th = p$pair_end_th,
+      fwd_binds = upstream_name, rev_binds = "Cryptic exon",
+      error = NULL)
+  }, error = function(e) list(error = conditionMessage(e)))
+}
+
+# --------------------------------------------------------------------------
 # High-level entry point
 # --------------------------------------------------------------------------
 
@@ -576,11 +598,21 @@ build_assay <- function(meta, primers, features, canonical_size, ce_lengths, geo
 #' @param downstream_exon list(name, start, end)
 #' @param ce_lengths numeric vector of cryptic-exon lengths in bp, e.g. c(128, 178)
 #' @param strand "+" or "-" (mRNA orientation of the gene)
+#' @param cryptic_exon optional list(start, end) -- the cryptic exon's own 1-based
+#'   plus-strand genomic coordinates. When supplied, a SECOND, cryptic-SPECIFIC
+#'   primer pair is designed with one primer anchored in the upstream real exon
+#'   and the other inside the cryptic exon, so its product can only form when the
+#'   cryptic exon is included (a clean yes/no validation band, vs. the size-shift
+#'   inclusion assay the main pair provides). Attached to the result as
+#'   $cryptic_specific; never disturbs the main assay/figure.
+#' @param cryptic_exon_seq optional pre-fetched sense-strand CE sequence (skips
+#'   the network fetch; mainly for tests)
 design_from_coords <- function(gene, assembly, chrom, strand,
                                 upstream_exon, downstream_exon, ce_lengths,
                                 citation, doi, title = NULL, subtitle = NULL,
                                 flank = 140, product_size_range = DEFAULT_PRODUCT_SIZE_RANGE,
-                                upstream_seq = NULL, downstream_seq = NULL, factor = "TDP-43") {
+                                upstream_seq = NULL, downstream_seq = NULL, factor = "TDP-43",
+                                cryptic_exon = NULL, cryptic_exon_seq = NULL) {
   plus_window <- NULL; window_start <- NULL
 
   if (is.null(upstream_seq) || is.null(downstream_seq)) {
@@ -657,7 +689,24 @@ design_from_coords <- function(gene, assembly, chrom, strand,
     upstream = list(name = upstream_exon$name, start = upstream_exon$start, end = upstream_exon$end),
     downstream = list(name = downstream_exon$name, start = downstream_exon$start, end = downstream_exon$end)
   )
-  build_assay(meta, primers, features, primers$canonical_size, ce_sorted, geometry = geometry)
+  assay <- build_assay(meta, primers, features, primers$canonical_size, ce_sorted, geometry = geometry)
+
+  # Optional cryptic-SPECIFIC pair (additive; never affects the main assay/figure).
+  if (!is.null(cryptic_exon)) {
+    ce_sense <- cryptic_exon_seq
+    if (is.null(ce_sense)) {
+      ce_plus <- fetch_genomic(chrom, cryptic_exon$start, cryptic_exon$end, assembly)
+      ce_sense <- if (strand == "-") revcomp(ce_plus) else ce_plus
+    }
+    # keep the reverse primer near the 5' end of the CE so the product stays short
+    ce_region <- substr(ce_sense, 1, min(flank, nchar(ce_sense)))
+    cs <- .design_cryptic_specific(upstream_seq, ce_region, upstream_exon$name)
+    cs$ce_coord <- sprintf("%s:%s-%s", chrom,
+                           formatC(cryptic_exon$start, big.mark = ",", format = "d"),
+                           formatC(cryptic_exon$end, big.mark = ",", format = "d"))
+    assay$cryptic_specific <- cs
+  }
+  assay
 }
 
 # --------------------------------------------------------------------------
