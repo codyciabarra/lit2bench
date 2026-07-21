@@ -666,7 +666,7 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                                        exon_len_range = c(20, 400),
                                        window_seq = NULL, window_seq_start = NULL,
                                        unanchored_read_mult = 3, min_fold_enrichment = 5,
-                                       known_exons = NULL) {
+                                       min_fold_enrichment_strong = 3, known_exons = NULL) {
   known_keys <- .junction_key(known_junc)
   known_starts <- unique(known_junc$start)
   known_ends <- unique(known_junc$end)
@@ -760,8 +760,22 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   # enrichment regardless of which library was sequenced deeper.
   kd$fold_enrichment <- ifelse(kd$control_reads > 0, kd$kd_reads_norm / kd$control_reads, Inf)
 
+  # Tiered fold threshold. CSF's core principle: a cryptic splice site is
+  # validated by its MOTIF (canonical consensus at a shared authentic site),
+  # not primarily by magnitude -- CSF calls sites reliably "even if supported
+  # by a single EST". So a junction that BOTH anchors to a real splice site
+  # AND has a canonical (GT-AG / GC-AG / AT-AC) motif at its novel end is
+  # already strong evidence of genuine splicing; for those, a modest KD
+  # enrichment (min_fold_enrichment_strong) is enough. The full
+  # min_fold_enrichment bar is reserved for junctions with a weaker prior --
+  # noncanonical motif, or motif unknown because no reference sequence was
+  # available. Measured on real data: SETX's verified cryptic acceptor
+  # (shared real donor, canonical GT-AG, 3.2x depth-normalized) is a true
+  # positive that the flat 5x bar was silently dropping.
+  strong_site <- kd$anchored & !is.na(kd$motif_canonical) & kd$motif_canonical
+  fold_bar <- ifelse(strong_site, min_fold_enrichment_strong, min_fold_enrichment)
   control_ok <- kd$control_reads <= max_control_reads |
-    (kd$control_reads > 0 & kd$kd_reads_norm >= kd$control_reads * min_fold_enrichment)
+    (kd$control_reads > 0 & kd$kd_reads_norm >= kd$control_reads * fold_bar)
   passes <- !kd$annotated & control_ok &
     ifelse(kd$anchored, kd$reads >= min_kd_reads, kd$reads >= min_kd_reads * unanchored_read_mult)
 
