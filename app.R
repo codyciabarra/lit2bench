@@ -1107,7 +1107,7 @@ server <- function(input, output, session) {
           tabPanel(sprintf("Retained introns (%d)", n_ri),
             br(),
             p(class = "l2b-card-sub",
-              "An intron that's spliced out less efficiently in knockdown -- reads pile up across the whole intron instead of being removed. This is a different signature from the two tabs above: it never produces a spliced junction at all, so junction-based detection can't see it no matter the threshold. TDP-43 loss causes widespread intron retention, so seeing several here is expected, not necessarily each one being its own distinct cryptic-exon event."),
+              "Elevated intronic coverage in knockdown, found by scanning each intron at base resolution -- this catches BOTH a fully retained intron (reads pile up across the whole thing instead of being spliced out) AND a cryptic exon buried deep inside a large intron whose own splice junctions are too weak to call (a localized coverage bump the junction tabs can't see). Each row's coordinates are the localized elevated segment. Scored by the intron-retention ratio (segment coverage relative to the gene's exonic level), so it's independent of sequencing depth and expression. TDP-43 loss causes widespread intron retention, so seeing several here is expected -- not necessarily each its own distinct event."),
             DTOutput("cryptic_retention_tbl"),
             div(style = "margin-top:10px;", downloadButton("cryptic_download_retention_csv", "Download retained introns (CSV)", class = "btn-dl"))
           ),

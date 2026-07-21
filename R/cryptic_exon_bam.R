@@ -340,11 +340,13 @@ read_region <- function(bam_path, chrom, start, end, index_stem = bam_path) {
   )
 }
 
-#' Per-base coverage over [start,end], bin-averaged down to n_bins points so the
-#' figure stays fast regardless of how wide the locus is.
-coverage_bins <- function(galn, chrom, start, end, n_bins = 800) {
-  n <- end - start + 1
-  if (length(galn) == 0) return(rep(0, min(n_bins, n)))
+#' Base-resolution coverage over [start,end] as a (compressed) Rle, padded with
+#' zeros if reads don't reach `end`. The single shared basis for both the binned
+#' figure coverage and the base-resolution peak scan used in intron detection --
+#' one read, one coverage computation, kept compressed so a wide window's full
+#' per-base profile costs kilobytes, not the megabytes an expanded vector would.
+window_coverage_rle <- function(galn, chrom, start, end) {
+  if (length(galn) == 0) return(S4Vectors::Rle(0L, end - start + 1))
   # NOTE: coverage()'s `width=` argument, when named, must name every seqlevel in
   # `galn` (every contig in the BAM header), not just the one we want -- so instead
   # of fighting that, compute coverage un-windowed and pad/crop this chrom's Rle by
@@ -352,10 +354,25 @@ coverage_bins <- function(galn, chrom, start, end, n_bins = 800) {
   cov <- GenomicAlignments::coverage(galn)
   rl <- cov[[chrom]]
   if (length(rl) < end) rl <- c(rl, S4Vectors::Rle(0L, end - length(rl)))
-  vals <- as.numeric(rl[start:end])
+  rl[start:end]
+}
+
+#' Average an Rle (or numeric) coverage profile down to n_bins evenly-spaced
+#' points for the figure. Identical binning math to the previous coverage_bins().
+bin_coverage <- function(rle, n_bins = 800) {
+  vals <- as.numeric(rle); n <- length(vals)
+  if (n == 0) return(rep(0, n_bins))
   if (n_bins >= n) return(vals)
   edges <- floor(seq(0, n, length.out = n_bins + 1))
   vapply(seq_len(n_bins), function(i) mean(vals[(edges[i] + 1):edges[i + 1]]), numeric(1))
+}
+
+#' Per-base coverage over [start,end], bin-averaged down to n_bins points so the
+#' figure stays fast regardless of how wide the locus is. (Thin wrapper kept for
+#' any caller that only wants bins; the pipeline uses the two functions above so
+#' it can also keep the base-resolution Rle.)
+coverage_bins <- function(galn, chrom, start, end, n_bins = 800) {
+  bin_coverage(window_coverage_rle(galn, chrom, start, end), n_bins)
 }
 
 #' Splice junctions supported by >= min_reads reads, as data.frame(start,end,reads).
@@ -382,10 +399,15 @@ junction_table <- function(galn, min_reads = 1, start = NULL, end = NULL) {
 }
 
 #' One indexed read of a BAM over a locus -> everything downstream needs.
+#' Returns the base-resolution coverage Rle alongside the binned figure
+#' coverage so intron detection can scan at full resolution (localized cryptic
+#' exons within a large intron are invisible to a coarse whole-window bin).
 bam_track_data <- function(bam_path, chrom, start, end, n_bins = 800, min_reads = 1,
                             index_stem = bam_path) {
   galn <- read_region(bam_path, chrom, start, end, index_stem = index_stem)
-  list(coverage = coverage_bins(galn, chrom, start, end, n_bins = n_bins),
+  rle_win <- window_coverage_rle(galn, chrom, start, end)
+  list(coverage = bin_coverage(rle_win, n_bins = n_bins),
+       coverage_rle = rle_win,
        junctions = junction_table(galn, min_reads = min_reads, start = start, end = end),
        n_reads = length(galn))
 }
@@ -425,6 +447,12 @@ bam_track_data_multi <- function(bam_paths, chrom, start, end, n_bins = 800, min
   cov_mat <- do.call(rbind, lapply(per_rep, function(r) r$coverage))
   pooled_cov <- if (nrow(cov_mat) == 1) cov_mat[1, ] else colMeans(cov_mat)
 
+  # Pool the base-resolution Rles the same way (mean across replicates) -- all
+  # cropped to the identical [start,end] so they're the same length and add
+  # elementwise. Stays a compressed Rle throughout.
+  rles <- lapply(per_rep, function(r) r$coverage_rle)
+  pooled_rle <- if (length(rles) == 1) rles[[1]] else Reduce(`+`, rles) / length(rles)
+
   all_j <- do.call(rbind, lapply(per_rep, function(r) r$junctions))
   if (is.null(all_j) || nrow(all_j) == 0) {
     pooled_j <- data.frame(start = integer(0), end = integer(0), reads = integer(0))
@@ -435,7 +463,7 @@ bam_track_data_multi <- function(bam_paths, chrom, start, end, n_bins = 800, min
     rownames(pooled_j) <- NULL
   }
 
-  list(coverage = pooled_cov, junctions = pooled_j,
+  list(coverage = pooled_cov, coverage_rle = pooled_rle, junctions = pooled_j,
        n_reads = sum(vapply(per_rep, function(r) r$n_reads, numeric(1))),
        n_replicates = length(bam_paths),
        per_replicate = lapply(per_rep, function(r) r$junctions))
@@ -872,27 +900,31 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
 # detect_cryptic_candidates() at any threshold because there was never a
 # junction to threshold.
 #
-# Reuses the coverage bins already computed for the sashimi figure (no new
-# BAM reads) -- for each annotated intron, maps its genomic span onto the
-# existing bin array and takes a robust (trimmed-median) coverage estimate.
+# Scans the base-resolution coverage Rle (from bam_track_data, one read) for a
+# localized PEAK of elevated intronic coverage rather than a whole-intron
+# average. Two real events are invisible to a whole-intron average but caught
+# here (both confirmed against verified data):
+#   * full intron retention -- the whole intron lights up (GALC): the peak
+#     spans essentially the whole intron.
+#   * a cryptic exon buried DEEP inside a large intron whose own splice
+#     junctions are too weak to call (NBEA): a ~2-3 kb coverage bump inside a
+#     27 kb intron, 8x enriched locally but diluted to ~1x when averaged over
+#     the whole intron. A per-intron mean/median cannot see this; a peak scan
+#     can. This is exactly the deeply-intronic, junction-invisible case that
+#     coverage-based methods (and CI-SpliceAI-style predictors) exist for.
 #
 # The retention SCORE is the intron-retention ratio (IR ratio, as IRFinder
 # et al. define it): intron coverage / the gene's own exonic coverage level,
-# computed WITHIN each sample. That ratio is what makes retention comparable
-# across conditions -- it's independent of both sequencing depth AND the
-# gene's expression level, so a change in it reflects a real change in how
-# much of the intron is retained, not a change in how deeply the library was
-# sequenced or how much the gene happens to be transcribed. The earlier
-# version normalized intron coverage by total window reads, which corrects
-# for depth but NOT for expression: if TDP-43 loss changes a gene's overall
-# output, that alone would shift the old score and manufacture (or mask)
-# apparent retention. Falls back to the depth-only normalization when no
+# computed WITHIN each sample. That ratio is independent of both sequencing
+# depth AND the gene's expression level, so a change in it reflects a real
+# change in retention, not a change in how deep the library is or how much
+# the gene is transcribed. Falls back to depth-only normalization when no
 # exon annotation is available so it still runs on a raw locus.
 # --------------------------------------------------------------------------
 
-#' @param control_coverage,kd_coverage the binned coverage vectors from
-#'        bam_track_data_multi() (as used for the sashimi figure).
-#' @param win_start,win_end the genomic window those vectors span (locus$start/end).
+#' @param control_rle,kd_rle base-resolution coverage Rles over the window
+#'        (bam_track_data_multi()$coverage_rle).
+#' @param win_start,win_end the genomic window the Rles span (locus$start/end).
 #' @param known_junc data.frame(start,end) of annotated introns.
 #' @param control_n_reads,kd_n_reads total reads in the window per condition
 #'        (used only for the no-annotation depth-normalization fallback).
@@ -901,66 +933,89 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
 #'        depth-only normalization.
 #' @param min_fold how many times higher the knockdown IR ratio must be than
 #'        control's to flag retention.
-#' @param max_intron_len introns longer than this are skipped. Raised well
-#'        above a typical intron because genuine large retained introns exist
-#'        (NBEA/GRIK2/MICU1 reference introns are all 27-35 kb, silently
-#'        excluded by the previous 20 kb cap); the ceiling only guards against
-#'        pathological whole-gene-spanning "introns" in malformed annotation.
+#' @param peak_bp width of the sliding scan window (bp) -- the smallest
+#'        localized bump it resolves; a cryptic exon is comfortably above this.
 #' @return data.frame(start,end,length,control_cov,kd_cov,fold,confidence),
-#'   sorted by fold descending (Inf first).
-detect_intron_retention <- function(control_coverage, kd_coverage, win_start, win_end, known_junc,
-                                     control_n_reads, kd_n_reads, n_bins = length(control_coverage),
+#'   with start/end the localized elevated segment (not necessarily the whole
+#'   intron), sorted by fold descending (Inf first).
+detect_intron_retention <- function(control_rle, kd_rle, win_start, win_end, known_junc,
+                                     control_n_reads, kd_n_reads,
                                      known_exons = NULL,
                                      min_intron_len = 30, max_intron_len = 200000,
-                                     min_fold = 3, min_ir_ratio = 0.05) {
+                                     min_fold = 3, min_ir_ratio = 0.3, peak_bp = 150) {
   empty <- data.frame(start = integer(0), end = integer(0), length = integer(0),
                        control_cov = numeric(0), kd_cov = numeric(0), fold = numeric(0),
                        confidence = character(0))
-  if (nrow(known_junc) == 0 || n_bins == 0) return(empty)
+  if (nrow(known_junc) == 0 || is.null(control_rle) || is.null(kd_rle)) return(empty)
+  wlen <- win_end - win_start + 1
+  cov_ctrl <- as.numeric(control_rle); cov_kd <- as.numeric(kd_rle)
+  if (length(cov_ctrl) != wlen || length(cov_kd) != wlen) return(empty)
 
   introns <- unique(known_junc)
   ilen <- introns$end - introns$start + 1
   introns <- introns[ilen >= min_intron_len & ilen <= max_intron_len, , drop = FALSE]
   if (nrow(introns) == 0) return(empty)
 
-  n <- win_end - win_start + 1
-  bin_typical <- function(cov, s, e) {
-    off_s <- max(1, s - win_start + 1); off_e <- min(n, e - win_start + 1)
-    if (off_s > off_e) return(NA_real_)
-    b_lo <- min(n_bins, max(1, ceiling(off_s / n * n_bins)))
-    b_hi <- min(n_bins, max(1, ceiling(off_e / n * n_bins)))
-    if (b_lo > b_hi) b_hi <- b_lo
-    # Trim the outermost bin on each end when there's room to: the boundary
-    # bin often straddles the intron/exon transition and picks up a slice of
-    # the neighboring exon's real (much higher) coverage, which -- averaged
-    # over what's usually a sparse intronic signal -- would otherwise swamp
-    # the whole estimate. Median (not mean) over what's left for the same
-    # reason: robust to any one remaining bin still catching a boundary read.
-    if (b_hi - b_lo >= 4) { b_lo <- b_lo + 1; b_hi <- b_hi - 1 }
-    stats::median(cov[b_lo:b_hi])
+  # Extract a [gstart,gend] genomic span's per-base coverage from a window vector.
+  slice_cov <- function(cov, gs, ge) {
+    a <- max(1, gs - win_start + 1); b <- min(wlen, ge - win_start + 1)
+    if (a > b) return(numeric(0))
+    cov[a:b]
   }
 
-  # Per-sample exonic coverage level (median over all annotated exons) -- the
-  # denominator of the IR ratio. Zero/absent means the gene isn't measurably
-  # expressed in that sample; we then fall back to depth normalization rather
-  # than dividing by ~0.
+  # Per-sample exonic coverage level (median of per-exon median coverage, so
+  # each exon counts once regardless of length) -- the IR-ratio denominator.
   exon_level <- function(cov) {
     if (is.null(known_exons) || nrow(known_exons) == 0) return(NA_real_)
-    vals <- vapply(seq_len(nrow(known_exons)),
-                   function(i) bin_typical(cov, known_exons$start[i], known_exons$end[i]), numeric(1))
+    vals <- vapply(seq_len(nrow(known_exons)), function(i) {
+      v <- slice_cov(cov, known_exons$start[i], known_exons$end[i])
+      if (length(v) == 0) NA_real_ else stats::median(v)
+    }, numeric(1))
     vals <- vals[!is.na(vals) & vals > 0]
     if (length(vals) == 0) return(NA_real_)
     stats::median(vals)
   }
-  ctrl_exon <- exon_level(control_coverage); kd_exon <- exon_level(kd_coverage)
+  ctrl_exon <- exon_level(cov_ctrl); kd_exon <- exon_level(cov_kd)
   use_ir <- is.finite(ctrl_exon) && is.finite(kd_exon) && ctrl_exon > 0 && kd_exon > 0
 
+  # For one intron, find the localized peak of KD coverage and its extent.
+  scan_intron <- function(gs, ge) {
+    ck <- slice_cov(cov_kd, gs, ge); cc <- slice_cov(cov_ctrl, gs, ge)
+    L <- length(ck)
+    if (L < 1 || length(cc) != L) return(NULL)
+    binbp <- 50L
+    nb <- max(1L, L %/% binbp)
+    edges <- floor(seq(0, L, length.out = nb + 1))
+    binmean <- function(v) vapply(seq_len(nb), function(i) mean(v[(edges[i] + 1):edges[i + 1]]), numeric(1))
+    kb <- binmean(ck); cb <- binmean(cc)
+    # trim the outermost bins (exon spillover at the intron boundaries) when
+    # there's room, so a bump right at the edge isn't just the flanking exon.
+    lo <- 1L; hi <- nb
+    if (nb >= 6) { lo <- 2L; hi <- nb - 1L }
+    valid <- lo:hi
+    w <- max(1L, min(length(valid), round(peak_bp / binbp)))
+    # sliding-window peak of KD coverage
+    starts <- valid[1]:(valid[length(valid)] - w + 1)
+    if (length(starts) == 0) starts <- valid[1]
+    means <- vapply(starts, function(i) mean(kb[i:(i + w - 1)]), numeric(1))
+    pk <- starts[which.max(means)]; pk_level <- max(means)
+    # expand the peak outward while KD stays >= 40% of the peak level -- gives
+    # a localized cryptic exon a tight extent and full retention ~the whole intron
+    li <- pk; ri <- pk + w - 1
+    while (li - 1 >= valid[1] && kb[li - 1] >= 0.4 * pk_level) li <- li - 1
+    while (ri + 1 <= valid[length(valid)] && kb[ri + 1] >= 0.4 * pk_level) ri <- ri + 1
+    seg_lo <- edges[li] + 1; seg_hi <- edges[ri + 1]
+    list(start = gs + seg_lo - 1, end = gs + seg_hi - 1,
+         control_cov = stats::median(cc[seg_lo:seg_hi]),
+         kd_cov = stats::median(ck[seg_lo:seg_hi]))
+  }
+
   rows <- lapply(seq_len(nrow(introns)), function(i) {
-    s <- introns$start[i]; e <- introns$end[i]
-    cc <- bin_typical(control_coverage, s, e); kc <- bin_typical(kd_coverage, s, e)
-    if (is.na(cc) || is.na(kc)) return(NULL)
-    data.frame(start = s, end = e, length = e - s + 1,
-               control_cov = round(cc, 2), kd_cov = round(kc, 2), stringsAsFactors = FALSE)
+    r <- scan_intron(introns$start[i], introns$end[i])
+    if (is.null(r)) return(NULL)
+    data.frame(start = r$start, end = r$end, length = r$end - r$start + 1,
+               control_cov = round(r$control_cov, 2), kd_cov = round(r$kd_cov, 2),
+               stringsAsFactors = FALSE)
   })
   rows <- rows[!vapply(rows, is.null, logical(1))]
   if (length(rows) == 0) return(empty)
@@ -969,7 +1024,7 @@ detect_intron_retention <- function(control_coverage, kd_coverage, win_start, wi
   if (use_ir) {
     ctrl_score <- out$control_cov / ctrl_exon           # IR ratio, control
     kd_score <- out$kd_cov / kd_exon                    # IR ratio, knockdown
-    kept_floor <- kd_score >= min_ir_ratio              # KD intron at >= 5% of exon level
+    kept_floor <- kd_score >= min_ir_ratio              # KD segment at >= 5% of exon level
   } else {
     if (is.null(control_n_reads) || is.null(kd_n_reads) || control_n_reads == 0 || kd_n_reads == 0) return(empty)
     ctrl_score <- out$control_cov / control_n_reads * 1e6
@@ -1097,7 +1152,7 @@ run_cryptic_detection <- function(locus, control_bams, kd_bams, assembly, thresh
     window_seq = window_seq, window_seq_start = locus$start, known_exons = known_exons)
   diff_tbl <- differential_splicing_table(control_track$per_replicate, kd_track$per_replicate, known_junc)
   retained_introns <- detect_intron_retention(
-    control_track$coverage, kd_track$coverage, locus$start, locus$end, known_junc,
+    control_track$coverage_rle, kd_track$coverage_rle, locus$start, locus$end, known_junc,
     control_n_reads = control_track$n_reads, kd_n_reads = kd_track$n_reads,
     known_exons = known_exons)
 
