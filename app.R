@@ -1014,8 +1014,9 @@ server <- function(input, output, session) {
               GC = sprintf("%s%%", c(cs$fwd_gc, cs$rev_gc)),
               `Product` = c(sprintf("%d bp (cryptic only)", cs$product_size), ""),
               check.names = FALSE)),
-            div(style = "margin-top:10px;",
-              actionButton("design_to_pcr_cryptic", "\U0001f9ea Set up PCR for the cryptic-specific pair →", class = "btn-alt", style = "width:auto;")))
+            div(style = "margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;",
+              actionButton("design_to_pcr_cryptic", "\U0001f9ea Set up PCR for the cryptic-specific pair →", class = "btn-alt", style = "width:auto;"),
+              actionButton("design_to_qpcr", "\U0001f4c9 Design qPCR validation (ΔΔCt) →", class = "btn-alt", style = "width:auto;")))
         )
       }
     )
@@ -1054,6 +1055,30 @@ server <- function(input, output, session) {
     req(!is.null(cs), is.null(cs$error))
     handoff_to_pcr(sprintf("%s cryptic-specific assay", design_res()$gene %||% "primer"),
                    cs$fwd_seq, cs$rev_seq, cs$product_size)
+  })
+
+  # -- Phase 2: qPCR ΔΔCt validation designer. The cryptic-specific pair is the
+  # short-amplicon TARGET; the reference is the user's housekeeping gene. Pre-load
+  # the ΔΔCt grid with a control + knockdown layout (control first -> becomes the
+  # calibrator automatically) and carry the target primers + expected result as a
+  # provenance note. We do NOT fabricate housekeeping primers -- the reference is
+  # the user's own standard assay, named in the note.
+  qpcr_provenance <- reactiveVal(NULL)
+  observeEvent(input$design_to_qpcr, {
+    req(design_res()); a <- design_res(); cs <- a$cryptic_specific
+    req(!is.null(cs), is.null(cs$error))
+    factor <- a$factor %||% "TDP-43"
+    ctrl_lbl <- "Control"; kd_lbl <- sprintf("%s KD", factor)
+    df <- data.frame(Sample = c(ctrl_lbl, kd_lbl),
+                     `Ct target` = c(NA_real_, NA_real_),
+                     `Ct reference` = c(NA_real_, NA_real_),
+                     check.names = FALSE, stringsAsFactors = FALSE)
+    qpcr_grid(df)
+    DT::replaceData(DT::dataTableProxy("qpcr_g"), df, resetPaging = FALSE, rownames = FALSE)
+    qpcr_provenance(list(gene = a$gene %||% "target", factor = factor,
+                         fwd = cs$fwd_seq, rev = cs$rev_seq, size = cs$product_size,
+                         calibrator = ctrl_lbl, kd = kd_lbl))
+    updateTabsetPanel(session, "tool_tabs", selected = "qpcr")
   })
 
   design_aside <- function() {
@@ -1584,12 +1609,25 @@ server <- function(input, output, session) {
     if (inherits(out, "error")) qpcr_err(conditionMessage(out)) else qpcr_res(out)
   })
   output$qpcr_out <- renderUI({
-    if (!is.null(qpcr_err())) return(div(class = "l2b-card", l2b_err(qpcr_err())))
-    if (is.null(qpcr_res())) return(div(class = "l2b-card", l2b_empty("\U0001f4c9", "No results yet", "Enter Ct values and click Calculate.")))
+    prov <- qpcr_provenance()
+    prov_card <- if (!is.null(prov)) div(class = "l2b-card",
+      div(class = "l2b-card-title", sprintf("\U0001f4c9 Validation layout: %s cryptic exon", prov$gene)),
+      p(class = "l2b-card-sub", HTML(paste0(
+        "<b>Ct target</b> = the cryptic-junction amplicon (primers below, ", prov$size, " bp). ",
+        "<b>Ct reference</b> = your housekeeping gene (e.g. GAPDH/ACTB) with your own standard primers. ",
+        "The grid is seeded with <b>", prov$calibrator, "</b> (calibrator) and <b>", prov$kd,
+        "</b> — fill in the Ct values from your run. A fold-change &gt; 1 in ", prov$kd,
+        " confirms the cryptic exon rises on ", prov$factor, " loss."))),
+      l2b_result_table(data.frame(
+        `Cryptic target primer` = c("FWD", "REV"), Sequence = c(prov$fwd, prov$rev),
+        check.names = FALSE)))
+
+    if (!is.null(qpcr_err())) return(tagList(prov_card, div(class = "l2b-card", l2b_err(qpcr_err()))))
+    if (is.null(qpcr_res())) return(tagList(prov_card, div(class = "l2b-card", l2b_empty("\U0001f4c9", "No results yet", "Enter Ct values and click Calculate."))))
     r <- qpcr_res(); df <- r$samples
     nc <- df[df$name != r$calibrator, , drop = FALSE]
     top <- if (nrow(nc) > 0) nc[which.max(abs(nc$ddct)), ] else NULL
-    div(class = "l2b-card",
+    tagList(prov_card, div(class = "l2b-card",
       div(class = "l2b-card-title", "Results"),
       p(class = "l2b-card-sub", sprintf("Relative to %s", r$calibrator)),
       l2b_hero(
@@ -1601,7 +1639,7 @@ server <- function(input, output, session) {
       ),
       DTOutput("qpcr_tbl"),
       l2b_warn(r$warnings)
-    )
+    ))
   })
   output$qpcr_tbl <- renderDT({
     req(qpcr_res()); df <- qpcr_res()$samples
