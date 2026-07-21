@@ -91,11 +91,37 @@ parse_locus_input <- function(text, assembly = "hg38", timeout_s = 15) {
           (!is.na(hgmatches) & grepl(needle, toupper(hgmatches), fixed = TRUE))
   }
   if (!any(ok)) {
+    # A gene symbol UCSC/HGNC has since renamed (e.g. UFD1L -> UFD1, "UFD1L"
+    # demoted to a legacy alias) can fail both tiers above outright, or --
+    # more dangerously -- fail *silently* onto a stale, too-narrow record for
+    # the old name (found this exact case with UFD1L: it "resolved" to a
+    # real but incomplete span missing the reference exon). A tempting fix
+    # is grepping UCSC's free-text `description` field, which does list
+    # legacy aliases -- but that field is unstructured prose, and two
+    # different attempts at this (a bare word-boundary search, then a
+    # tighter token-adjacency heuristic requiring the alias sit next to an
+    # identifier-shaped token) each silently resolved a DIFFERENT unrelated
+    # gene's canonical record instead, caught only by re-validating every
+    # gene end to end rather than by reasoning about the regex. Getting a
+    # gene-resolution path wrong silently is worse than getting it wrong
+    # loudly, so this deliberately does not attempt free-text alias
+    # matching -- say so plainly instead and point at the fix.
     stop(sprintf(
-      "Couldn't resolve '%s' to a locus via UCSC gene/transcript search. Enter a literal locus instead (e.g. chr19:17,600,000-17,660,000).",
+      "Couldn't resolve '%s' to a locus via UCSC gene/transcript search. If this symbol has been renamed (check genenames.org), try its current HGNC symbol, or enter a literal locus instead (e.g. chr19:17,600,000-17,660,000).",
       gene))
   }
-  rec <- recs[which(ok)[1]]
+  # Among whichever tier(s) matched, prefer a record UCSC itself flags
+  # canonical ("canonical": true) over just taking the first hit in API
+  # response order -- multiple RefSeq mRNA versions for one gene symbol can
+  # have meaningfully different overall gene-body spans (alternate first/
+  # last exons, UTR extensions across annotation releases, or -- as above --
+  # an entirely superseded symbol), and the first one returned is not
+  # reliably the most complete/current one. Only changes anything when a
+  # canonical option actually exists among the matches; otherwise identical
+  # to the previous first-match behavior.
+  cand_idx <- which(ok)
+  canonical <- vapply(recs[cand_idx], function(r) grepl('"canonical"\\s*:\\s*true', r), logical(1))
+  rec <- if (any(canonical)) recs[cand_idx[which(canonical)[1]]] else recs[cand_idx[1]]
   posm <- regmatches(rec, regexpr('"position"\\s*:\\s*"([^"]*)"', rec))
   pos <- sub('.*"position"\\s*:\\s*"([^"]*)".*', "\\1", posm)
   pm <- regmatches(pos, regexec("^(chr[0-9XYMT]+):([0-9]+)-([0-9]+)$", pos, ignore.case = TRUE))[[1]]
