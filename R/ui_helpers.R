@@ -163,7 +163,7 @@ L2B_CSS <- "
     border-radius:16px; padding:18px; margin-bottom:16px;
     box-shadow:var(--l2b-shadow), inset 0 1px 0 var(--l2b-glass-highlight); }
   /* keep real content above the ::before sheen without needing z-index juggling */
-  .l2b-aside-card > *, .l2b-nav > *, .l2b-card > * { position:relative; }
+  .l2b-aside-card > *, .l2b-nav > *, .l2b-card > * { position:relative; z-index:1; }
   .l2b-aside-title { font-size:11px; font-weight:800; letter-spacing:.09em; text-transform:uppercase;
     color:var(--l2b-text-faint); margin:0 0 12px; }
   .l2b-aside-row { display:flex; align-items:flex-start; gap:9px; font-size:13.5px; color:var(--l2b-text);
@@ -453,6 +453,48 @@ L2B_CSS <- "
   @media (prefers-reduced-motion: reduce) {
     .l2b-nav, .l2b-card, .l2b-aside-card { animation:none; }
   }
+
+  /* ================= POINTER SPOTLIGHT =================
+     A soft light that tracks the cursor across the glass surfaces -- the
+     'lit from where you're pointing' read of a modern product page. Driven
+     by JS setting --l2b-mx/--l2b-my per hovered card (throttled to rAF).
+     Painted on ::after (the ::before is already the fixed specular sheen)
+     and screen-blended so it only brightens; the card's own content sits at
+     z-index:1 (see rule above) so text is never washed out. */
+  .l2b-card, .l2b-nav, .l2b-aside-card { --l2b-mx:50%; --l2b-my:-30%; }
+  .l2b-card::after, .l2b-nav::after, .l2b-aside-card::after {
+    content:''; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+    opacity:0; transition:opacity .4s ease; mix-blend-mode:screen;
+    background:radial-gradient(360px circle at var(--l2b-mx) var(--l2b-my),
+                               var(--l2b-glass-highlight), transparent 55%); }
+  .l2b-card.l2b-spot::after, .l2b-nav.l2b-spot::after, .l2b-aside-card.l2b-spot::after { opacity:.75; }
+
+  /* ================= LIVING BRAND MARK =================
+     The gradient tile slowly slides its own gradient (a caught-light sheen)
+     so the mark reads as lit glass catching a moving highlight, not a static
+     swatch -- the one persistently-animated accent in the chrome. */
+  .l2b-brand-mark { background-size:190% 190%; animation:l2bBrandSheen 9s ease-in-out infinite; }
+  @keyframes l2bBrandSheen { 0%,100% { background-position:0% 50%; } 50% { background-position:100% 50%; } }
+
+  /* the empty-state glass bubble breathes gently (its mirror reflection,
+     anchored at top:100%, rides along with it) */
+  @keyframes l2bFloat { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-5px); } }
+  .l2b-empty-icon { animation:l2bFloat 4.8s ease-in-out infinite; }
+
+  /* micro-interactions: nav items lean toward the pointer; action buttons
+     give a physical press cue */
+  .l2b-nav .btn { transition:background .15s, color .15s, transform .2s cubic-bezier(.2,.8,.2,1); }
+  .l2b-nav .btn:hover { transform:translateX(3px); }
+  .btn-run:active, .btn-dl:active, .btn-alt:active, .btn-ghost:active { transform:translateY(1px) scale(.992); }
+
+  /* a stat value glows faintly while its number is counting up */
+  .l2b-stat-value.l2b-counting { color:var(--l2b-accent-text); transition:color .3s; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .l2b-brand-mark, .l2b-empty-icon { animation:none; }
+    .l2b-card::after, .l2b-nav::after, .l2b-aside-card::after { transition:none; }
+    .l2b-nav .btn:hover, .btn-run:active, .btn-dl:active, .btn-alt:active, .btn-ghost:active { transform:none; }
+  }
 "
 
 # Client-side theme toggle (instant, no server round-trip needed to repaint the
@@ -507,6 +549,78 @@ L2B_JS <- "
       });
     }
   });
+
+  var reduceMotion = false;
+  try { reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch(e) {}
+
+  // --- pointer spotlight: track the cursor and light the card under it. One
+  //     delegated listener, throttled to a single rAF, updating --l2b-mx/-my
+  //     on the hovered card (CSS paints the rest). ---------------------------
+  var spotEl = null, spotRaf = null, spotX = 0, spotY = 0;
+  document.addEventListener('pointermove', function(e){
+    spotX = e.clientX; spotY = e.clientY;
+    if (spotRaf) return;
+    spotRaf = requestAnimationFrame(function(){
+      spotRaf = null;
+      var el = document.elementFromPoint(spotX, spotY);
+      var card = (el && el.closest) ? el.closest('.l2b-card, .l2b-nav, .l2b-aside-card') : null;
+      if (card !== spotEl) {
+        if (spotEl) spotEl.classList.remove('l2b-spot');
+        spotEl = card;
+        if (spotEl) spotEl.classList.add('l2b-spot');
+      }
+      if (card) {
+        var r = card.getBoundingClientRect();
+        card.style.setProperty('--l2b-mx', ((spotX - r.left) / r.width  * 100) + '%');
+        card.style.setProperty('--l2b-my', ((spotY - r.top)  / r.height * 100) + '%');
+      }
+    });
+  });
+
+  // --- animated count-up on stat values. Fires on first paint and on every
+  //     result re-render (renderUI swaps in fresh .l2b-stat-value nodes, which
+  //     the MutationObserver below catches). Only pure numbers (optionally a
+  //     short suffix like x or %) animate; labels/gene names are left alone. --
+  function countUp(el){
+    if (el.dataset.l2bCounted) return;
+    el.dataset.l2bCounted = '1';
+    var raw = (el.textContent || '').trim();
+    var m = raw.match(/^(-?[\\d,]+(?:\\.\\d+)?)(\\D{0,4})$/);
+    if (!m) return;
+    var numStr = m[1], suffix = m[2] || '';
+    var hasComma = numStr.indexOf(',') !== -1;
+    var target = parseFloat(numStr.replace(/,/g, ''));
+    if (!isFinite(target) || reduceMotion || Math.abs(target) > 1e7) return;
+    var dot = numStr.indexOf('.'), decimals = dot === -1 ? 0 : numStr.length - dot - 1;
+    function fmt(v){
+      var s = v.toFixed(decimals);
+      if (hasComma) s = Number(s).toLocaleString('en-US', {minimumFractionDigits:decimals, maximumFractionDigits:decimals});
+      return s + suffix;
+    }
+    el.classList.add('l2b-counting');
+    el.textContent = fmt(0);
+    var dur = 680, t0 = performance.now();
+    function step(now){
+      var p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+      el.textContent = fmt(target * e);
+      if (p < 1) requestAnimationFrame(step);
+      else { el.textContent = fmt(target); el.classList.remove('l2b-counting'); }
+    }
+    requestAnimationFrame(step);
+  }
+  function scanCounts(root){ (root || document).querySelectorAll('.l2b-stat-value').forEach(countUp); }
+  scanCounts();
+  new MutationObserver(function(muts){
+    for (var i = 0; i < muts.length; i++) {
+      var added = muts[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var n = added[j];
+        if (n.nodeType !== 1) continue;
+        if (n.classList && n.classList.contains('l2b-stat-value')) countUp(n);
+        if (n.querySelectorAll) scanCounts(n);
+      }
+    }
+  }).observe(document.body, {childList:true, subtree:true});
 })();
 "
 
