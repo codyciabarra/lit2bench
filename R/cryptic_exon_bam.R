@@ -679,11 +679,39 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   ctrl_keys <- .junction_key(control_junc)
   ctrl_reads_by_key <- stats::setNames(control_junc$reads, ctrl_keys)
 
+  # Library-depth size factor between the two conditions, estimated from the
+  # junctions they SHARE (the constitutive splicing program present in both).
+  # Raw junction fold (kd_reads/control_reads) is otherwise confounded by
+  # sequencing depth: measured directly on this data, per-window kd/control
+  # depth ranged 0.64x (shallow KD) to 1.36x (deep KD) -- enough to make a
+  # constitutive junction look "enriched" in a deep-KD window (false positive)
+  # or a genuine cryptic event look sub-threshold in a shallow-KD one (false
+  # negative). Scaling KD reads to control-equivalent depth makes the fold
+  # mean the same thing in every window and every dataset. A housekeeping
+  # (shared-junction) estimate is used rather than a raw total-read ratio
+  # precisely because the latter is itself distorted by the novel/retained
+  # events we're trying to measure; shared constitutive junctions are the
+  # stable reference. Falls back to 1 (no correction) when there's nothing
+  # shared to estimate from.
+  kd_keys_all <- .junction_key(kd_junc)
+  shared_keys <- intersect(kd_keys_all, ctrl_keys)
+  size_factor <- if (length(shared_keys) > 0) {
+    kd_shared <- sum(kd_junc$reads[kd_keys_all %in% shared_keys])
+    ctrl_shared <- sum(control_junc$reads[ctrl_keys %in% shared_keys])
+    if (ctrl_shared > 0) kd_shared / ctrl_shared else 1
+  } else 1
+  if (!is.finite(size_factor) || size_factor <= 0) size_factor <- 1
+
   kd <- kd_junc
   kd$key <- .junction_key(kd)
   kd$annotated <- kd$key %in% known_keys
   kd$control_reads <- ifelse(kd$key %in% names(ctrl_reads_by_key),
                               unname(ctrl_reads_by_key[kd$key]), 0L)
+  # KD reads scaled to control-equivalent sequencing depth -- used ONLY for
+  # the relative (fold / control-quiet) comparisons below, never for the
+  # absolute min_kd_reads evidence floor, which must stay on real observed
+  # counts (depth-scaling can't manufacture reads that weren't sequenced).
+  kd$kd_reads_norm <- kd$reads / size_factor
   kd$anchor_donor <- kd$start %in% anchor_starts
   kd$anchor_acceptor <- kd$end %in% anchor_ends
   kd$exitron <- rep(FALSE, nrow(kd))
@@ -712,10 +740,12 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   # not a two-junction exon insertion (see candidate_exons below) -- fold
   # enrichment is what makes those visible as a real hit on their own,
   # instead of reading as just another row in a long junction list.
-  kd$fold_enrichment <- ifelse(kd$control_reads > 0, kd$reads / kd$control_reads, Inf)
+  # Depth-normalized (kd_reads_norm), so the same value means the same real
+  # enrichment regardless of which library was sequenced deeper.
+  kd$fold_enrichment <- ifelse(kd$control_reads > 0, kd$kd_reads_norm / kd$control_reads, Inf)
 
   control_ok <- kd$control_reads <= max_control_reads |
-    (kd$control_reads > 0 & kd$reads >= kd$control_reads * min_fold_enrichment)
+    (kd$control_reads > 0 & kd$kd_reads_norm >= kd$control_reads * min_fold_enrichment)
   passes <- !kd$annotated & control_ok &
     ifelse(kd$anchored, kd$reads >= min_kd_reads, kd$reads >= min_kd_reads * unanchored_read_mult)
 
@@ -814,31 +844,49 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
 #
 # Reuses the coverage bins already computed for the sashimi figure (no new
 # BAM reads) -- for each annotated intron, maps its genomic span onto the
-# existing bin array, averages, and normalizes by each sample's own total
-# read count (a reads-per-million-style depth correction, since control and
-# knockdown libraries are rarely sequenced to identical depth) before
-# comparing.
+# existing bin array and takes a robust (trimmed-median) coverage estimate.
+#
+# The retention SCORE is the intron-retention ratio (IR ratio, as IRFinder
+# et al. define it): intron coverage / the gene's own exonic coverage level,
+# computed WITHIN each sample. That ratio is what makes retention comparable
+# across conditions -- it's independent of both sequencing depth AND the
+# gene's expression level, so a change in it reflects a real change in how
+# much of the intron is retained, not a change in how deeply the library was
+# sequenced or how much the gene happens to be transcribed. The earlier
+# version normalized intron coverage by total window reads, which corrects
+# for depth but NOT for expression: if TDP-43 loss changes a gene's overall
+# output, that alone would shift the old score and manufacture (or mask)
+# apparent retention. Falls back to the depth-only normalization when no
+# exon annotation is available so it still runs on a raw locus.
 # --------------------------------------------------------------------------
 
 #' @param control_coverage,kd_coverage the binned coverage vectors from
 #'        bam_track_data_multi() (as used for the sashimi figure).
 #' @param win_start,win_end the genomic window those vectors span (locus$start/end).
 #' @param known_junc data.frame(start,end) of annotated introns.
-#' @param control_n_reads,kd_n_reads total reads in the window per condition,
-#'        for depth normalization.
-#' @param min_fold how many times higher the knockdown's depth-normalized
-#'        intron coverage must be than control's to flag retention.
+#' @param control_n_reads,kd_n_reads total reads in the window per condition
+#'        (used only for the no-annotation depth-normalization fallback).
+#' @param known_exons data.frame(start,end) of annotated exons, for the
+#'        within-sample IR ratio (intron cov / exonic cov). NULL falls back to
+#'        depth-only normalization.
+#' @param min_fold how many times higher the knockdown IR ratio must be than
+#'        control's to flag retention.
+#' @param max_intron_len introns longer than this are skipped. Raised well
+#'        above a typical intron because genuine large retained introns exist
+#'        (NBEA/GRIK2/MICU1 reference introns are all 27-35 kb, silently
+#'        excluded by the previous 20 kb cap); the ceiling only guards against
+#'        pathological whole-gene-spanning "introns" in malformed annotation.
 #' @return data.frame(start,end,length,control_cov,kd_cov,fold,confidence),
 #'   sorted by fold descending (Inf first).
 detect_intron_retention <- function(control_coverage, kd_coverage, win_start, win_end, known_junc,
                                      control_n_reads, kd_n_reads, n_bins = length(control_coverage),
-                                     min_intron_len = 30, max_intron_len = 20000,
-                                     min_fold = 3, min_kd_norm_cov = 0.05) {
+                                     known_exons = NULL,
+                                     min_intron_len = 30, max_intron_len = 200000,
+                                     min_fold = 3, min_ir_ratio = 0.05) {
   empty <- data.frame(start = integer(0), end = integer(0), length = integer(0),
                        control_cov = numeric(0), kd_cov = numeric(0), fold = numeric(0),
                        confidence = character(0))
-  if (nrow(known_junc) == 0 || is.null(control_n_reads) || is.null(kd_n_reads) ||
-      control_n_reads == 0 || kd_n_reads == 0 || n_bins == 0) return(empty)
+  if (nrow(known_junc) == 0 || n_bins == 0) return(empty)
 
   introns <- unique(known_junc)
   ilen <- introns$end - introns$start + 1
@@ -862,6 +910,21 @@ detect_intron_retention <- function(control_coverage, kd_coverage, win_start, wi
     stats::median(cov[b_lo:b_hi])
   }
 
+  # Per-sample exonic coverage level (median over all annotated exons) -- the
+  # denominator of the IR ratio. Zero/absent means the gene isn't measurably
+  # expressed in that sample; we then fall back to depth normalization rather
+  # than dividing by ~0.
+  exon_level <- function(cov) {
+    if (is.null(known_exons) || nrow(known_exons) == 0) return(NA_real_)
+    vals <- vapply(seq_len(nrow(known_exons)),
+                   function(i) bin_typical(cov, known_exons$start[i], known_exons$end[i]), numeric(1))
+    vals <- vals[!is.na(vals) & vals > 0]
+    if (length(vals) == 0) return(NA_real_)
+    stats::median(vals)
+  }
+  ctrl_exon <- exon_level(control_coverage); kd_exon <- exon_level(kd_coverage)
+  use_ir <- is.finite(ctrl_exon) && is.finite(kd_exon) && ctrl_exon > 0 && kd_exon > 0
+
   rows <- lapply(seq_len(nrow(introns)), function(i) {
     s <- introns$start[i]; e <- introns$end[i]
     cc <- bin_typical(control_coverage, s, e); kc <- bin_typical(kd_coverage, s, e)
@@ -873,11 +936,19 @@ detect_intron_retention <- function(control_coverage, kd_coverage, win_start, wi
   if (length(rows) == 0) return(empty)
   out <- do.call(rbind, rows)
 
-  ctrl_norm <- out$control_cov / control_n_reads * 1e6
-  kd_norm <- out$kd_cov / kd_n_reads * 1e6
-  out$fold <- ifelse(ctrl_norm > 0, kd_norm / ctrl_norm, ifelse(kd_norm > 0, Inf, 0))
+  if (use_ir) {
+    ctrl_score <- out$control_cov / ctrl_exon           # IR ratio, control
+    kd_score <- out$kd_cov / kd_exon                    # IR ratio, knockdown
+    kept_floor <- kd_score >= min_ir_ratio              # KD intron at >= 5% of exon level
+  } else {
+    if (is.null(control_n_reads) || is.null(kd_n_reads) || control_n_reads == 0 || kd_n_reads == 0) return(empty)
+    ctrl_score <- out$control_cov / control_n_reads * 1e6
+    kd_score <- out$kd_cov / kd_n_reads * 1e6
+    kept_floor <- kd_score >= 0.05
+  }
+  out$fold <- ifelse(ctrl_score > 0, kd_score / ctrl_score, ifelse(kd_score > 0, Inf, 0))
 
-  keep <- kd_norm >= min_kd_norm_cov & (out$fold >= min_fold | is.infinite(out$fold))
+  keep <- kept_floor & (out$fold >= min_fold | is.infinite(out$fold))
   out <- out[keep, , drop = FALSE]
   if (nrow(out) == 0) return(empty)
 
@@ -997,7 +1068,8 @@ run_cryptic_detection <- function(locus, control_bams, kd_bams, assembly, thresh
   diff_tbl <- differential_splicing_table(control_track$per_replicate, kd_track$per_replicate, known_junc)
   retained_introns <- detect_intron_retention(
     control_track$coverage, kd_track$coverage, locus$start, locus$end, known_junc,
-    control_n_reads = control_track$n_reads, kd_n_reads = kd_track$n_reads)
+    control_n_reads = control_track$n_reads, kd_n_reads = kd_track$n_reads,
+    known_exons = known_exons)
 
   res <- build_cryptic_result(locus, control_track, kd_track, transcripts, candidates)
   res$differential <- diff_tbl
