@@ -66,6 +66,10 @@ separate install.
   script-sourced Shiny app you run directly. Verification is manual (run it,
   exercise the tool, check the output).
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## Credits
 
 Built by **Cody Ciabarra** (Research Intern / programmer), with **Yi Zeng, Ph.D.**
