@@ -1270,7 +1270,7 @@ server <- function(input, output, session) {
           ce_lengths = ce, citation = trimws(input$citation), doi = trimws(input$doi), flank = input$flank,
           product_size_range = product_range,
           factor = if (nzchar(trimws(input$factor))) trimws(input$factor) else "TDP-43",
-          cryptic_exon = ce_apply)
+          cryptic_exon = ce_apply, mode = input$primer_mode %||% "pcr")
         incProgress(0.4, detail = "building figure")
         design_res(assay)
         goto_design_step(4)

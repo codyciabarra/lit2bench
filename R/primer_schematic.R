@@ -112,16 +112,72 @@ panel_primers <- function(a, col = LIGHT_COL) {
   s <- c(s, sprintf('<path d="M%s,%s L%s,%s L%s,%s Z" fill="%s"/>', fx1 - 11, top_y - 6, fx1, top_y, fx1 - 11, top_y + 6, COL$primer))
   s <- c(s, sprintf('<text x="%s" y="%s" text-anchor="middle" font-size="12" font-weight="700" fill="%s">%s</text>',
                      fmid, top_y - 10, COL$primer, fwd$name))
-  s <- c(s, sprintf('<text x="%s" y="%s" text-anchor="middle" font-size="11" %s fill="%s">5\u2032-%s-3\u2032</text>',
-                     fmid, box_top - 9, mono, COL$ink, fwd$seq))
 
   rx0 <- 700; rx1 <- 590; rmid <- (rx0 + rx1) / 2
   s <- c(s, sprintf('<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="%s" stroke-width="4"/>', rx0, bot_y, rx1 + 9, bot_y, COL$primer))
   s <- c(s, sprintf('<path d="M%s,%s L%s,%s L%s,%s Z" fill="%s"/>', rx1 + 11, bot_y - 6, rx1, bot_y, rx1 + 11, bot_y + 6, COL$primer))
   s <- c(s, sprintf('<text x="%s" y="%s" text-anchor="middle" font-size="12" font-weight="700" fill="%s">%s</text>',
                      rmid, bot_y - 9, COL$primer, rev$name))
-  s <- c(s, sprintf('<text x="%s" y="%s" text-anchor="middle" font-size="11" %s fill="%s">5\u2032-%s-3\u2032</text>',
-                     rmid, box_bot + 40, mono, COL$ink, rev$seq))
+  s <- c(s, '</svg>')
+  paste(s, collapse = "")
+}
+
+# --------------------------------------------------------------------------
+# Panel A (qPCR) -- junction-spanning primer on the SPLICED transcript.
+# Unlike the PCR view (primers flank the junction on genomic DNA, product spans
+# it), here the two exons are drawn adjacent as they are in the mRNA, and the
+# junction-spanning primer straddles the exon-exon boundary -- so it only primes
+# a template that actually contains that exact junction. Drawn from the real
+# junction-spanning design (a$junction_spanning), so it reflects the reality.
+# --------------------------------------------------------------------------
+.arrow_h <- function(x0, x1, y, col, label = NULL, above = TRUE) {
+  dir <- if (x1 > x0) 1 else -1
+  tip <- x1; shaft_end <- x1 - dir * 10
+  out <- paste0(
+    sprintf('<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="%s" stroke-width="4" stroke-linecap="round"/>', x0, y, shaft_end, y, col),
+    sprintf('<path d="M%s,%s L%s,%s L%s,%s Z" fill="%s"/>', tip - dir * 11, y - 6, tip, y, tip - dir * 11, y + 6, col))
+  if (!is.null(label))
+    out <- paste0(out, sprintf('<text x="%s" y="%s" text-anchor="middle" font-size="11.5" font-weight="700" fill="%s">%s</text>',
+                               (x0 + x1) / 2, if (above) y - 11 else y + 20, col, label))
+  out
+}
+
+panel_primers_qpcr <- function(a, js, col = LIGHT_COL) {
+  COL <- col
+  up_name <- a$primers$fwd$binds
+  dn_name <- if (identical(js$junction, "cryptic")) "Cryptic exon" else a$primers$rev$binds
+  jx <- 430; y <- 116; box_top <- 86; box_bot <- 146
+  ex_lt <- COL$exon_lt; ex <- COL$exon; ex_dk <- COL$exon_dk
+  dn_lt <- if (identical(js$junction, "cryptic")) COL$ce_lt else COL$exon_lt
+  dn_bd <- if (identical(js$junction, "cryptic")) COL$ce else COL$exon
+  dn_tx <- if (identical(js$junction, "cryptic")) COL$ce_dk else COL$exon_dk
+
+  s <- c('<svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg" ',
+         'font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" role="img" ',
+         'aria-label="Junction-spanning qPCR primer on the spliced transcript">')
+  # two exons drawn adjacent (as in the mRNA), sharing the junction at jx
+  s <- c(s, sprintf('<rect x="120" y="%s" width="%s" height="%s" rx="5" fill="%s" stroke="%s" stroke-width="1.5"/>', box_top, jx - 120, box_bot - box_top, ex_lt, ex))
+  s <- c(s, sprintf('<rect x="%s" y="%s" width="%s" height="%s" rx="5" fill="%s" stroke="%s" stroke-width="1.5"/>', jx, box_top, 740 - jx, box_bot - box_top, dn_lt, dn_bd))
+  s <- c(s, sprintf('<text x="%s" y="%s" text-anchor="middle" font-size="13" font-weight="600" fill="%s">%s</text>', (120 + jx) / 2, box_bot + 22, ex_dk, up_name))
+  s <- c(s, sprintf('<text x="%s" y="%s" text-anchor="middle" font-size="13" font-weight="600" fill="%s">%s</text>', (jx + 740) / 2, box_bot + 22, dn_tx, dn_name))
+  # junction marker
+  s <- c(s, sprintf('<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="%s" stroke-width="1.5" stroke-dasharray="3 3"/>', jx, box_top - 16, jx, box_bot + 6, COL$muted))
+  s <- c(s, sprintf('<text x="%s" y="%s" text-anchor="middle" font-size="10.5" fill="%s">%s junction</text>', jx, box_top - 22, COL$muted, if (identical(js$junction, "cryptic")) "cryptic" else "exon\u2013exon"))
+  # mRNA strand hint
+  s <- c(s, sprintf('<text x="126" y="%s" font-size="10.5" fill="%s">spliced mRNA 5\u2032\u21923\u2032</text>', box_top - 22, COL$muted))
+
+  # the junction-spanning primer straddles jx; the partner primer sits in its exon
+  span_fwd <- identical(js$spanning_primer, "fwd")
+  if (span_fwd) {
+    s <- c(s, .arrow_h(jx - 46, jx + 44, y, COL$primer, "FWD (spans junction)", above = TRUE))
+    s <- c(s, .arrow_h(690, 610, y + 0, COL$primer, "REV", above = FALSE))
+  } else {
+    s <- c(s, .arrow_h(180, 260, y, COL$primer, "FWD", above = TRUE))
+    s <- c(s, .arrow_h(jx + 46, jx - 44, y, COL$primer, "REV (spans junction)", above = FALSE))
+  }
+  # product bracket
+  bx0 <- if (span_fwd) jx - 46 else 180; bx1 <- if (span_fwd) 690 else jx + 46
+  s <- c(s, .bracket(bx0, bx1, box_bot + 46, sprintf("%s bp \u00b7 junction-specific", js$product_size), COL$band))
   s <- c(s, '</svg>')
   paste(s, collapse = "")
 }
@@ -326,6 +382,29 @@ build_html <- function(a, dark = FALSE) {
   else
     "The primer pair spans this splice junction directly, so a product only appears if this exon is really spliced in as shown. Not to scale."
 
+  # mode-aware primer panel: qPCR draws the real junction-spanning design (a
+  # primer straddling the exon-exon junction on the spliced transcript, plus a
+  # second one on the cryptic junction); PCR draws the genomic flanking map.
+  is_qpcr <- identical(a$mode, "qpcr") && !is.null(a$junction_spanning) && is.null(a$junction_spanning$error)
+  if (is_qpcr) {
+    primer_panel_svg <- panel_primers_qpcr(a, a$junction_spanning, COL)
+    jc <- a$junction_spanning_cryptic
+    has_cryptic_js <- !is.null(jc) && is.null(jc$error)
+    if (has_cryptic_js)
+      primer_panel_svg <- paste0(primer_panel_svg,
+        sprintf('<div style="border-top:1px dashed %s; margin:8px 24px;"></div>', COL$rule),
+        panel_primers_qpcr(a, jc, COL))
+    primer_heading <- if (has_cryptic_js) "Junction-spanning primers (qPCR)" else "Junction-spanning primer (qPCR)"
+    primer_caption <- if (has_cryptic_js)
+      "Each primer straddles a splice junction on the spliced transcript, so it only primes a template containing that exact junction — junction-specific detection, not a size shift. Top: the canonical exon–exon junction; bottom: the cryptic junction, quantifying the cryptic isoform. Not to scale."
+    else
+      "The primer straddles the exon–exon junction on the spliced transcript, so it only primes a template containing that exact junction — junction-specific detection, not a product-size shift. Not to scale."
+  } else {
+    primer_panel_svg <- panel_primers(a, COL)
+    primer_heading <- "Primer binding — both strands"
+    primer_caption <- "Forward primer anneals to the antisense (bottom) strand and reads 5′→3′ left-to-right along the sense strand, within the upstream exon; reverse primer anneals to the sense (top) strand within the downstream exon. Not to scale."
+  }
+
   sprintf('<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -382,11 +461,9 @@ build_html <- function(a, dark = FALSE) {
     (specificity vs. paralogs) and an oligo analyzer (dimers / hairpins)
     before purchase. Gel panel is illustrative of the expected pattern, not experimental data.</div>
 
-  <h2>1 \u00b7 Primer binding \u2014 both strands</h2>
+  <h2>1 \u00b7 %s</h2>
   <div class="fig">%s
-    <p class="figcap">Forward primer anneals to the antisense (bottom) strand and reads
-      5\u2032\u21923\u2032 left-to-right along the sense strand, within the upstream exon; reverse primer
-      anneals to the sense (top) strand within the downstream exon. Not to scale.</p></div>
+    <p class="figcap">%s</p></div>
 
   <table><thead><tr><th>Primer</th><th>Sequence (5\u2032\u21923\u2032)</th><th>Length</th>
     <th>Binds</th><th>Genomic footprint</th><th>Tm</th><th>GC</th></tr></thead>
@@ -425,7 +502,7 @@ build_html <- function(a, dark = FALSE) {
     COL$exon,
     a$title, a$subtitle,
     a$gene, a$assembly, a$citation, a$doi, a$doi,
-    panel_primers(a, COL),
+    primer_heading, primer_panel_svg, primer_caption,
     prim_rows,
     preview_section,
     panel_outcomes(a, COL),

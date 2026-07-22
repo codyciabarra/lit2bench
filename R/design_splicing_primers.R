@@ -151,6 +151,65 @@ design_junction_primers <- function(upstream_exon_seq, downstream_exon_seq,
   )
 }
 
+#' Design a pair where ONE primer physically STRADDLES the exon-exon junction
+#' (a junction-spanning primer, for qPCR) rather than merely flanking it. Uses
+#' primer3's SEQUENCE_OVERLAP_JUNCTION_LIST so a primer must overlap the junction
+#' between the two exons -- the amplicon then only forms from a template that
+#' actually contains that exact junction (the canonical one, or a specific
+#' cryptic one), giving junction-specific detection instead of a size shift.
+#' Sequences must already be in sense (mRNA) orientation.
+design_junction_spanning_primers <- function(upstream_exon_seq, downstream_exon_seq,
+                                     product_size_range = QPCR_PRODUCT_SIZE_RANGE, opt_tm = 60.0,
+                                     tm_range = c(58.0, 62.0), gc_range = c(40.0, 60.0),
+                                     size_range = c(18, 25)) {
+  template <- paste0(upstream_exon_seq, downstream_exon_seq)
+  junction <- nchar(upstream_exon_seq)   # junction sits between base `junction` and `junction`+1
+  if (nchar(template) < product_size_range[1])
+    stop(sprintf("No junction-spanning pair possible: the flanking sequence totals only %d bp, but the minimum product size is %d bp. Lower the minimum product size, or pick a target with more flanking sequence.",
+                 nchar(template), product_size_range[1]))
+
+  res <- .call_primer3(
+    seq_args = list(SEQUENCE_ID = "junction_spanning", SEQUENCE_TEMPLATE = template,
+                     SEQUENCE_OVERLAP_JUNCTION_LIST = as.character(junction)),
+    global_args = list(
+      PRIMER_TASK = "generic", PRIMER_PICK_LEFT_PRIMER = 1, PRIMER_PICK_RIGHT_PRIMER = 1,
+      PRIMER_OPT_SIZE = 20, PRIMER_MIN_SIZE = size_range[1], PRIMER_MAX_SIZE = size_range[2],
+      PRIMER_OPT_TM = opt_tm, PRIMER_MIN_TM = tm_range[1], PRIMER_MAX_TM = tm_range[2],
+      PRIMER_MIN_GC = gc_range[1], PRIMER_MAX_GC = gc_range[2],
+      PRIMER_MIN_3_PRIME_OVERLAP_OF_JUNCTION = 4, PRIMER_MIN_5_PRIME_OVERLAP_OF_JUNCTION = 7,
+      PRIMER_PRODUCT_SIZE_RANGE = sprintf("%d-%d", product_size_range[1], product_size_range[2])
+    )
+  )
+  n <- if (!is.null(res[["PRIMER_PAIR_NUM_RETURNED"]])) as.integer(res[["PRIMER_PAIR_NUM_RETURNED"]]) else 0L
+  if (n < 1)
+    stop("primer3 returned no acceptable junction-spanning pair; widen product_size_range or relax Tm/GC (a junction-spanning primer is more constrained than a flanking one).")
+
+  # which primer straddles the junction (for the schematic to draw honestly).
+  # primer3 gives PRIMER_LEFT_0 = "start,len" and PRIMER_RIGHT_0 = "start,len",
+  # both 0-based with start the 5'-most base of the LEFT primer / the 3'-most
+  # (rightmost) base of the RIGHT primer on the top strand.
+  left <- as.integer(strsplit(res[["PRIMER_LEFT_0"]], ",")[[1]])
+  right <- as.integer(strsplit(res[["PRIMER_RIGHT_0"]], ",")[[1]])
+  left_lo <- left[1]; left_hi <- left[1] + left[2] - 1
+  right_hi <- right[1]; right_lo <- right[1] - right[2] + 1
+  j0 <- junction - 1L  # 0-based index of the last upstream base
+  left_span  <- left_lo <= j0 && left_hi > j0
+  right_span <- right_lo <= j0 && right_hi > j0
+  spanning <- if (left_span) "fwd" else if (right_span) "rev" else "fwd"
+
+  .th <- function(field) if (!is.null(res[[field]])) as.numeric(res[[field]]) else 0.0
+  list(
+    fwd_seq = res[["PRIMER_LEFT_0_SEQUENCE"]], rev_seq = res[["PRIMER_RIGHT_0_SEQUENCE"]],
+    fwd_tm = round(as.numeric(res[["PRIMER_LEFT_0_TM"]]), 1), rev_tm = round(as.numeric(res[["PRIMER_RIGHT_0_TM"]]), 1),
+    fwd_gc = round(as.numeric(res[["PRIMER_LEFT_0_GC_PERCENT"]]), 1), rev_gc = round(as.numeric(res[["PRIMER_RIGHT_0_GC_PERCENT"]]), 1),
+    canonical_size = as.integer(res[["PRIMER_PAIR_0_PRODUCT_SIZE"]]),
+    pair_any_th = .th("PRIMER_PAIR_0_COMPL_ANY_TH"), pair_end_th = .th("PRIMER_PAIR_0_COMPL_END_TH"),
+    fwd_self_any_th = round(.th("PRIMER_LEFT_0_SELF_ANY_TH"), 1), fwd_self_end_th = round(.th("PRIMER_LEFT_0_SELF_END_TH"), 1), fwd_hairpin_th = round(.th("PRIMER_LEFT_0_HAIRPIN_TH"), 1),
+    rev_self_any_th = round(.th("PRIMER_RIGHT_0_SELF_ANY_TH"), 1), rev_self_end_th = round(.th("PRIMER_RIGHT_0_SELF_END_TH"), 1), rev_hairpin_th = round(.th("PRIMER_RIGHT_0_HAIRPIN_TH"), 1),
+    spanning_primer = spanning, junction_pos = junction
+  )
+}
+
 # --------------------------------------------------------------------------
 # 4. Genomic footprint by search (strand-agnostic, deterministic)
 # --------------------------------------------------------------------------
@@ -540,6 +599,7 @@ build_assay <- function(meta, primers, features, canonical_size, ce_lengths, geo
   }
   list(
     title = meta$title, subtitle = meta$subtitle, gene = meta$gene, factor = factor,
+    mode = meta$mode %||% "pcr",
     assembly = meta$assembly, citation = meta$citation, doi = meta$doi,
     primers = list(
       fwd = list(name = "FWD", seq = primers$fwd_seq, binds = meta$upstream_exon_name,
@@ -612,7 +672,7 @@ design_from_coords <- function(gene, assembly, chrom, strand,
                                 citation, doi, title = NULL, subtitle = NULL,
                                 flank = 140, product_size_range = DEFAULT_PRODUCT_SIZE_RANGE,
                                 upstream_seq = NULL, downstream_seq = NULL, factor = "TDP-43",
-                                cryptic_exon = NULL, cryptic_exon_seq = NULL) {
+                                cryptic_exon = NULL, cryptic_exon_seq = NULL, mode = "pcr") {
   plus_window <- NULL; window_start <- NULL
 
   if (is.null(upstream_seq) || is.null(downstream_seq)) {
@@ -678,7 +738,7 @@ design_from_coords <- function(gene, assembly, chrom, strand,
                else if (no_ce) sprintf("Confirming %s is spliced to %s", upstream_exon$name, downstream_exon$name)
                else sprintf("Distinguishing canonical splicing from %s-loss cryptic-exon inclusion", factor),
     gene = gene, assembly = sprintf("%s, %s, %s strand", assembly, chrom, if (strand == "-") "minus" else "plus"),
-    citation = citation, doi = doi, factor = factor,
+    citation = citation, doi = doi, factor = factor, mode = mode,
     upstream_exon_name = upstream_exon$name, downstream_exon_name = downstream_exon$name
   )
   # raw numeric geometry (chrom/strand/exon coords), kept separate from the
@@ -705,6 +765,28 @@ design_from_coords <- function(gene, assembly, chrom, strand,
                            formatC(cryptic_exon$start, big.mark = ",", format = "d"),
                            formatC(cryptic_exon$end, big.mark = ",", format = "d"))
     assay$cryptic_specific <- cs
+  }
+
+  # qPCR mode: junction-SPANNING primers -- one primer straddles the exon-exon
+  # junction, designed on the spliced template, so it detects a specific
+  # junction (canonical, and the cryptic one) rather than a product size shift.
+  # Additive and NOT genomically located (a spanning primer legitimately isn't
+  # contiguous in genomic DNA), exactly like the cryptic-specific pair above --
+  # so it never disturbs the main flanking assay or its convergence backstop.
+  if (identical(mode, "qpcr")) {
+    keep <- c("fwd_seq", "rev_seq", "fwd_tm", "rev_tm", "fwd_gc", "rev_gc", "spanning_primer")
+    assay$junction_spanning <- tryCatch({
+      js <- design_junction_spanning_primers(upstream_seq, downstream_seq)
+      c(js[keep], list(product_size = js$canonical_size, junction = "canonical",
+        fwd_binds = upstream_exon$name, rev_binds = downstream_exon$name, error = NULL))
+    }, error = function(e) list(error = conditionMessage(e)))
+    if (!is.null(cryptic_exon)) {
+      assay$junction_spanning_cryptic <- tryCatch({
+        js <- design_junction_spanning_primers(upstream_seq, ce_region)
+        c(js[keep], list(product_size = js$canonical_size, junction = "cryptic",
+          fwd_binds = upstream_exon$name, rev_binds = "Cryptic exon", error = NULL))
+      }, error = function(e) list(error = conditionMessage(e)))
+    }
   }
   assay
 }
