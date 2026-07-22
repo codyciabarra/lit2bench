@@ -13,16 +13,23 @@ interpretation step.
 
 ## Quick start
 
-```r
-# 1. install the core dependencies (once)
-install.packages(c("shiny", "bslib", "DT"))
+```bash
+# 1. install ALL dependencies once (CRAN + Bioconductor; only what's missing)
+Rscript setup.R
 
-# 2. run the app from the project root
-shiny::runApp("app.R")
+# 2. launch (re-checks deps, opens your browser)
+Rscript run.R
 ```
 
-or open `app.R` in RStudio and click **Run App**. The app opens on a landing
-page; pick a tool from the left nav.
+Or inside R/RStudio: run `source("setup.R")` once, then open `app.R` and click
+**Run App**. The app opens on a landing page; pick a tool from the left nav.
+
+`setup.R` installs the core packages **and** the optional per-tool ones
+(`Rsamtools`, `GenomicAlignments`, `pwalign`, `httr`) so every tool works out of
+the box — no hunting down Bioconductor packages by hand.
+
+**Updating:** from the app's **About** tab, click **Check for updates** →
+**Update now** (a `git pull` under the hood), then restart. Or just `git pull`.
 
 ## What's inside
 

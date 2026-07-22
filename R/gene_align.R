@@ -323,11 +323,12 @@ ga_blast_ncbi <- function(sequence, organism = NULL, identity_threshold = 90,
   }
   xml <- .ga_http(sprintf("%s?CMD=Get&FORMAT_TYPE=XML&RID=%s", base, rid), timeout_s = 120)
 
-  hits <- regmatches(xml, gregexpr("<Hit>.*?</Hit>", xml, perl = TRUE))[[1]]
+  # (?s) dotall: <Hit>...</Hit> blocks span newlines, so `.` must match them.
+  hits <- regmatches(xml, gregexpr("(?s)<Hit>.*?</Hit>", xml, perl = TRUE))[[1]]
   pull <- function(block, tag) {
-    m <- regmatches(block, regexpr(sprintf("<%s>([^<]*)</%s>", tag, tag), block))
+    m <- regmatches(block, regexpr(sprintf("<%s>([^<]*)</%s>", tag, tag), block, perl = TRUE))
     if (length(m) == 0) return(NA_character_)
-    sub(sprintf(".*<%s>([^<]*)</%s>.*", tag, tag), "\\1", m)
+    sub(sprintf("<%s>([^<]*)</%s>", tag, tag), "\\1", m)
   }
   rows <- list()
   for (h in hits) {

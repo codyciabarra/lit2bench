@@ -594,6 +594,15 @@ panel_about <- function() {
       div(class = "l2b-about-foot",
         tags$a(href = "https://gitlerlab.org", target = "_blank", rel = "noopener", "gitlerlab.org"))),
 
+    l2b_card(NULL, "Updates", "Lit2Bench runs from a local git clone — pull the latest from GitHub without leaving the app.",
+      div(style = "font-size:13px; color:var(--l2b-text-muted); margin-bottom:12px;",
+          textOutput("about_version", inline = TRUE)),
+      div(style = "display:flex; gap:10px; flex-wrap:wrap;",
+        actionButton("about_check", "Check for updates", class = "btn-ghost"),
+        actionButton("about_update", "\U2b07 Update now", class = "btn-alt", style = "width:auto;")),
+      div(style = "margin-top:12px; font-size:13.5px; color:var(--l2b-text);",
+          textOutput("about_update_msg", inline = TRUE))),
+
     l2b_card(NULL, "Acknowledgements", NULL,
       p(class = "l2b-person-blurb", style = "margin:0;",
         HTML('The Plasmid QC tool is ported from <a href="https://github.com/alexluu88/GeneAlignProject" target="_blank" rel="noopener">GeneAlign</a> by <b>Alex Luu</b>.')))
@@ -846,6 +855,39 @@ server <- function(input, output, session) {
   for (f in HOME_FEATURES) local({
     tt <- f$tool
     observeEvent(input[[paste0("home_feat_", tt)]], updateTabsetPanel(session, "tool_tabs", selected = tt))
+  })
+
+  # ---- ABOUT: self-update from the git checkout ----
+  .l2b_git <- function(args) tryCatch(
+    suppressWarnings(system2("git", args, stdout = TRUE, stderr = TRUE)),
+    error = function(e) structure(character(0), status = 1L))
+  about_update_msg <- reactiveVal("")
+  output$about_version <- renderText({
+    input$about_check  # re-read after a check
+    sha <- .l2b_git(c("rev-parse", "--short", "HEAD"))
+    subj <- .l2b_git(c("log", "-1", "--pretty=%s"))
+    if (length(sha) && nzchar(sha[1]) && is.null(attr(sha, "status")))
+      sprintf("Current build: %s — %s", sha[1], if (length(subj)) subj[1] else "")
+    else "Not a git checkout — self-update unavailable (use git pull manually)."
+  })
+  output$about_update_msg <- renderText(about_update_msg())
+  observeEvent(input$about_check, {
+    .l2b_git(c("fetch", "--quiet"))
+    behind <- .l2b_git(c("rev-list", "--count", "HEAD..@{u}"))
+    n <- suppressWarnings(as.integer(behind[1]))
+    about_update_msg(
+      if (length(behind) == 0 || is.na(n)) "Couldn't check (no tracking remote, or git unavailable)."
+      else if (n == 0) "Up to date with origin/main."
+      else sprintf("%d update%s available — click Update now.", n, if (n == 1) "" else "s"))
+  })
+  observeEvent(input$about_update, {
+    out <- .l2b_git(c("pull", "--ff-only"))
+    txt <- paste(out, collapse = " ")
+    if (!is.null(attr(out, "status")) && attr(out, "status") != 0)
+      about_update_msg(sprintf("Update failed: %s", substr(txt, 1, 200)))
+    else if (grepl("up to date", txt, ignore.case = TRUE))
+      about_update_msg("Already up to date.")
+    else about_update_msg("Updated from GitHub. Restart the app (stop and re-run) to apply the changes.")
   })
 
   # ======================================================================
