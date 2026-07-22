@@ -56,6 +56,7 @@ theme_l2b <- bs_theme(
 
 # tool registry -- id, label, icon, group
 TOOLS <- list(
+  list(id = "home",     label = "Home",              icon = "\U0001f3e0", group = "Home"),
   list(id = "notebook", label = "Lab Notebook",      icon = "\U0001f4d3", group = "Notebook"),
   list(id = "explorer", label = "Transcript Explorer", icon = "\U0001f9ed", group = "Design"),
   list(id = "extractor", label = "Exon Extractor",     icon = "\U00002702", group = "Design"),
@@ -77,10 +78,27 @@ TOOLS <- list(
 )
 TOOL_BY_ID <- setNames(TOOLS, sapply(TOOLS, `[[`, "id"))
 
+# Landing-page feature cards -- each jumps into the named tool (see server).
+HOME_FEATURES <- list(
+  list(tool = "cryptic",  icon = "\U0001f52c", title = "Cryptic Splicing Engine",
+       blurb = "Read control vs. knockdown BAMs over a locus and flag cryptic exons, cryptic splice sites, exitrons, and intron retention in an IGV-style sashimi plot."),
+  list(tool = "design",   icon = "\U0001f9ec", title = "Primer & Schematic",
+       blurb = "Design junction-spanning primers against live reference sequence, with expected canonical vs. cryptic product sizes and a schematic."),
+  list(tool = "notebook", icon = "\U0001f4d3", title = "Lab Notebook",
+       blurb = "Build reusable procedures and spin up experiments with editable tables — everything saves to disk and reopens across sessions."),
+  list(tool = "batch",    icon = "\U0001f5c2", title = "Panel Runner",
+       blurb = "Run the cryptic-detection pipeline across a whole gene list against one BAM pair, then click any hit to open it in the engine."),
+  list(tool = "qpcr",     icon = "\U0001f4c9", title = "qPCR & Densitometry",
+       blurb = "Relative expression by 2^-ΔΔCt with QC warnings, plus Western-band densitometry normalized to a loading control."),
+  list(tool = "report",   icon = "\U0001f4cb", title = "Methods & Ordering",
+       blurb = "Auto-assemble a primer ordering sheet, a references list, and a templated Methods paragraph from whatever you ran this session.")
+)
+
 # right-rail content: a one-line honest description (no invented metrics) and
 # 2 related tools to jump to -- both genuinely derived from how the tools chain
 # together in a typical workflow.
 TOOL_ABOUT <- list(
+  home     = "The landing page: what Lit2Bench does and who built it, with quick jumps into the main tools.",
   notebook = "An electronic lab notebook that saves to disk. Procedures are reusable templates (Objective / Reagents / Experimental setup with editable tables / Results / Conclusions); spin up an Experiment from a procedure, fill in your run and results, and Save — entries persist as JSON files you can reopen and edit across sessions.",
   explorer = "Search a gene symbol, RefSeq/Ensembl transcript ID, or a locus and see every annotated isoform in the region -- strand, length, coding status, exon/intron counts, CDS and UTR spans.",
   extractor = "Pulls real exon and intron sequence for a chosen transcript, exports BED/FASTA/CSV/JSON/GTF, and hands a chosen exon straight to the Primer Designer -- no manual coordinate copying.",
@@ -101,6 +119,7 @@ TOOL_ABOUT <- list(
   about   = "Who built Lit2Bench, and the lab behind the cryptic-splicing biology it targets."
 )
 TOOL_RELATED <- list(
+  home = c("cryptic", "notebook"),
   notebook = c("design", "pcr"),
   explorer = c("extractor", "design"), extractor = c("design", "explorer"),
   design = c("extractor", "cryptic", "plasmid"), cryptic = c("design", "batch"),
@@ -442,6 +461,64 @@ panel_notebook <- function() {
   )
 }
 
+# --------------------------------------------------------------- PANEL: HOME
+# Animated layered "glass waves" pinned to the hero floor -- a single repeating
+# wave path re-used at four offsets, each panned horizontally at its own speed
+# (the classic SVG-parallax idiom), coloured from the theme's --l2b-wave-* tokens
+# and disabled under prefers-reduced-motion (see ui_helpers.R).
+l2b_waves <- function() {
+  HTML(paste0(
+    '<div class="l2b-waves" aria-hidden="true">',
+    '<svg viewBox="0 24 150 28" preserveAspectRatio="none" shape-rendering="auto">',
+    '<defs><path id="l2bWavePath" d="M-160 44c30 0 58-18 88-18s58 18 88 18 58-18 88-18 58 18 88 18 v44h-352z"/></defs>',
+    '<g class="parallax">',
+    '<use href="#l2bWavePath" xlink:href="#l2bWavePath" x="48" y="0"/>',
+    '<use href="#l2bWavePath" xlink:href="#l2bWavePath" x="48" y="3"/>',
+    '<use href="#l2bWavePath" xlink:href="#l2bWavePath" x="48" y="5"/>',
+    '<use href="#l2bWavePath" xlink:href="#l2bWavePath" x="48" y="7"/>',
+    '</g></svg></div>'))
+}
+
+panel_home <- function() {
+  feature <- function(f) {
+    actionLink(paste0("home_feat_", f$tool), class = "l2b-card l2b-feature",
+      label = tagList(
+        div(class = "l2b-feature-ico", f$icon),
+        div(class = "l2b-feature-title", f$title),
+        div(class = "l2b-feature-blurb", f$blurb),
+        div(class = "l2b-feature-go", "Open \U2192")))
+  }
+  mini <- function(photo, name, role) div(class = "l2b-mini-person",
+    tags$img(class = "l2b-mini-photo", src = photo, alt = name),
+    div(div(class = "l2b-mini-name", name), div(class = "l2b-mini-role", role)))
+
+  div(class = "l2b-home",
+    div(class = "l2b-hero-wrap",
+      div(class = "l2b-hero-inner",
+        div(class = "l2b-hero-badge", "Bench toolkit for splicing"),
+        h1(class = "l2b-hero-title", "Lit2Bench"),
+        p(class = "l2b-hero-lead",
+          "Detect TDP-43-driven cryptic exons from RNA-seq, design and validate the assays to confirm them, and keep the whole workflow — from primer to gel to lab notebook — in one place."),
+        div(class = "l2b-hero-cta",
+          actionButton("home_cta_cryptic", "\U0001f52c  Launch Cryptic Engine", class = "btn-run", style = "width:auto;"),
+          actionButton("home_cta_notebook", "\U0001f4d3  Open Lab Notebook", class = "btn-ghost"))),
+      l2b_waves()),
+
+    div(class = "l2b-home-section",
+      h2(class = "l2b-home-h2", "What it does"),
+      div(class = "l2b-feature-grid", lapply(HOME_FEATURES, feature))),
+
+    div(class = "l2b-home-section",
+      h2(class = "l2b-home-h2", "The people"),
+      div(class = "l2b-home-people",
+        mini("about/me.jpg", "Cody Ciabarra", "Research Intern · Programmer"),
+        mini("about/gitler.jpg", "Aaron D. Gitler, Ph.D.", "Professor of Genetics · Lab supervisor"),
+        mini("about/yi_zeng.jpg", "Yi Zeng, Ph.D.", "Postdoctoral Fellow · Code mentor")),
+      div(style = "margin-top:14px;",
+        actionButton("home_cta_about", "More about the project \U2192", class = "btn-ghost")))
+  )
+}
+
 # -------------------------------------------------------------- PANEL: ABOUT
 panel_about <- function() {
   person <- function(photo, name, role, blurb, lead = FALSE, email = NULL) {
@@ -590,6 +667,7 @@ ui <- page_fluid(
     div(class = "l2b-col-nav", uiOutput("nav_sidebar")),
     div(class = "l2b-col-main",
       tabsetPanel(id = "tool_tabs", type = "hidden",
+        tabPanel("home", panel_home()),
         tabPanel("notebook", panel_notebook()),
         tabPanel("explorer", panel_explorer()),
         tabPanel("extractor", panel_extractor()),
@@ -627,7 +705,7 @@ server <- function(input, output, session) {
   # tell the client which tool is active so CSS can switch layout (full-width,
   # no right rail, for wide-figure tools like the Cryptic Splicing Engine)
   observe({
-    session$sendCustomMessage("l2bTool", if (is.null(input$tool_tabs)) "design" else input$tool_tabs)
+    session$sendCustomMessage("l2bTool", if (is.null(input$tool_tabs)) "home" else input$tool_tabs)
   })
 
   # ======================================================================
@@ -697,7 +775,7 @@ server <- function(input, output, session) {
   # on every tab switch, which corrupts DataTables' internal JS state.)
   # ======================================================================
   output$nav_sidebar <- renderUI({
-    active <- if (is.null(input$tool_tabs)) "design" else input$tool_tabs
+    active <- if (is.null(input$tool_tabs)) "home" else input$tool_tabs
     groups <- unique(sapply(TOOLS, `[[`, "group"))
     div(class = "l2b-nav",
         lapply(groups, function(g) {
@@ -718,6 +796,14 @@ server <- function(input, output, session) {
       observeEvent(input[[paste0("aside_nav_", tid)]], updateTabsetPanel(session, "tool_tabs", selected = tid))
     })
   }
+  # landing-page navigation: hero CTAs + feature cards jump into a tool
+  observeEvent(input$home_cta_cryptic,  updateTabsetPanel(session, "tool_tabs", selected = "cryptic"))
+  observeEvent(input$home_cta_notebook, updateTabsetPanel(session, "tool_tabs", selected = "notebook"))
+  observeEvent(input$home_cta_about,    updateTabsetPanel(session, "tool_tabs", selected = "about"))
+  for (f in HOME_FEATURES) local({
+    tt <- f$tool
+    observeEvent(input[[paste0("home_feat_", tt)]], updateTabsetPanel(session, "tool_tabs", selected = tt))
+  })
 
   # ======================================================================
   # LOGIC
@@ -2397,7 +2483,7 @@ server <- function(input, output, session) {
   }
 
   output$aside_out <- renderUI({
-    active <- if (is.null(input$tool_tabs)) "design" else input$tool_tabs
+    active <- if (is.null(input$tool_tabs)) "home" else input$tool_tabs
     if (identical(active, "design")) return(design_aside())
     # the engine runs full-width (no right rail) -- its status lives in the hero stats
     if (identical(active, "cryptic")) return(NULL)

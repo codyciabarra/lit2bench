@@ -29,6 +29,7 @@ L2B_CSS <- "
     --l2b-danger:#f2555b; --l2b-danger-soft:rgba(242,85,91,.14);
     --l2b-shadow:0 10px 34px rgba(0,0,0,.46);
     --l2b-glow-1:rgba(143,125,250,.20); --l2b-glow-2:rgba(79,140,255,.14); --l2b-glow-3:rgba(47,217,196,.10);
+    --l2b-wave-1:rgba(143,125,250,.30); --l2b-wave-2:rgba(79,140,255,.24); --l2b-wave-3:rgba(47,217,196,.18); --l2b-wave-4:rgba(163,148,255,.42);
     --l2b-scrollbar:#2b3352;
     color-scheme: dark;
   }
@@ -47,6 +48,7 @@ L2B_CSS <- "
     --l2b-danger:#c0392b; --l2b-danger-soft:rgba(192,57,43,.10);
     --l2b-shadow:0 4px 20px rgba(30,40,80,.09);
     --l2b-glow-1:rgba(99,85,224,.10); --l2b-glow-2:rgba(47,109,240,.08); --l2b-glow-3:rgba(15,172,150,.07);
+    --l2b-wave-1:rgba(99,85,224,.18); --l2b-wave-2:rgba(47,109,240,.15); --l2b-wave-3:rgba(15,172,150,.13); --l2b-wave-4:rgba(99,85,224,.26);
     --l2b-scrollbar:#d5dbe8;
     color-scheme: light;
   }
@@ -385,10 +387,10 @@ L2B_CSS <- "
   .l2b-col-nav, .l2b-col-main, .l2b-col-aside { min-width:0; }
   /* full-width tools (e.g. the Cryptic Splicing Engine) drop the right rail so wide
      figures get the room they need */
-  body[data-tool='cryptic'] .l2b-shell { grid-template-columns:210px minmax(0,1fr); }
-  body[data-tool='cryptic'] .l2b-col-aside { display:none; }
+  body[data-tool='cryptic'] .l2b-shell, body[data-tool='home'] .l2b-shell { grid-template-columns:210px minmax(0,1fr); }
+  body[data-tool='cryptic'] .l2b-col-aside, body[data-tool='home'] .l2b-col-aside { display:none; }
   @media (max-width:1180px) {
-    .l2b-shell, body[data-tool='cryptic'] .l2b-shell { grid-template-columns:1fr; }
+    .l2b-shell, body[data-tool='cryptic'] .l2b-shell, body[data-tool='home'] .l2b-shell { grid-template-columns:1fr; }
     .l2b-col-aside { display:none; }
     .l2b-nav { position:static; }
   }
@@ -538,6 +540,63 @@ L2B_CSS <- "
   .l2b-person-contact a::before { content:'\\2709'; font-size:12px; }
   .l2b-person-contact a:hover { background:var(--l2b-surface-hover); transform:translateY(-1px); }
   .l2b-about-foot { margin-top:16px; font-size:13.5px; font-weight:600; }
+
+  /* ================= LANDING / HOME ================= */
+  .l2b-hero-wrap { position:relative; overflow:hidden; border-radius:22px; margin-bottom:28px;
+    min-height:452px; display:flex; align-items:center;
+    background:linear-gradient(155deg, var(--l2b-glass), var(--l2b-glass-2));
+    border:1px solid var(--l2b-glass-border);
+    box-shadow:var(--l2b-shadow), inset 0 1px 0 var(--l2b-glass-highlight);
+    backdrop-filter:blur(22px) saturate(160%); -webkit-backdrop-filter:blur(22px) saturate(160%); }
+  .l2b-hero-inner { position:relative; z-index:2; padding:58px 50px 128px; max-width:740px; }
+  .l2b-hero-badge { display:inline-flex; align-items:center; gap:7px; font-size:11px; font-weight:800;
+    letter-spacing:.12em; text-transform:uppercase; color:var(--l2b-accent-text); background:var(--l2b-accent-soft);
+    border:1px solid var(--l2b-glass-border); padding:6px 14px; border-radius:999px; margin-bottom:20px; }
+  .l2b-hero-badge::before { content:''; width:7px; height:7px; border-radius:50%; background:var(--l2b-accent);
+    box-shadow:0 0 0 3px var(--l2b-accent-soft); }
+  .l2b-hero-title { font-size:66px; font-weight:800; letter-spacing:-1.6px; line-height:1; margin:0 0 18px;
+    background:var(--l2b-accent-grad); -webkit-background-clip:text; background-clip:text;
+    -webkit-text-fill-color:transparent; color:transparent; }
+  .l2b-hero-lead { font-size:17px; line-height:1.6; color:var(--l2b-text-muted); max-width:580px; margin:0 0 28px; }
+  .l2b-hero-cta { display:flex; gap:12px; flex-wrap:wrap; }
+
+  /* animated glass waves pinned to the hero floor */
+  .l2b-waves { position:absolute; left:0; right:0; bottom:-1px; width:100%; height:160px; z-index:1; pointer-events:none; }
+  .l2b-waves svg { width:100%; height:100%; display:block; }
+  .l2b-waves .parallax use { animation:l2bWave 24s cubic-bezier(.55,.5,.45,.5) infinite; }
+  .l2b-waves .parallax use:nth-child(1){ fill:var(--l2b-wave-1); animation-delay:-2s; animation-duration:9s; }
+  .l2b-waves .parallax use:nth-child(2){ fill:var(--l2b-wave-2); animation-delay:-3s; animation-duration:12s; }
+  .l2b-waves .parallax use:nth-child(3){ fill:var(--l2b-wave-3); animation-delay:-4s; animation-duration:16s; }
+  .l2b-waves .parallax use:nth-child(4){ fill:var(--l2b-wave-4); animation-delay:-5s; animation-duration:22s; }
+  @keyframes l2bWave { 0% { transform:translate3d(-90px,0,0); } 100% { transform:translate3d(85px,0,0); } }
+
+  .l2b-home-section { margin:0 0 32px; }
+  .l2b-home-h2 { font-size:13px; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--l2b-text-faint); margin:0 0 16px; }
+  .l2b-feature-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(252px, 1fr)); gap:16px; }
+  .l2b-feature { display:block; text-align:left; text-decoration:none; color:inherit; margin:0 !important; cursor:pointer;
+    transition:transform .18s cubic-bezier(.2,.8,.2,1), border-color .18s, box-shadow .18s; }
+  .l2b-feature:hover { transform:translateY(-3px); border-color:var(--l2b-accent); color:inherit;
+    box-shadow:0 14px 32px rgba(20,20,40,.24), inset 0 1px 0 var(--l2b-glass-highlight); }
+  .l2b-feature-ico { width:46px; height:46px; border-radius:13px; display:flex; align-items:center; justify-content:center;
+    font-size:22px; background:var(--l2b-accent-soft); border:1px solid var(--l2b-glass-border); margin-bottom:13px;
+    box-shadow:inset 0 1px 0 var(--l2b-glass-highlight); }
+  .l2b-feature-title { font-size:15.5px; font-weight:750; color:var(--l2b-text); margin-bottom:6px; }
+  .l2b-feature-blurb { font-size:13px; color:var(--l2b-text-muted); line-height:1.5; }
+  .l2b-feature-go { margin-top:11px; font-size:12.5px; font-weight:700; color:var(--l2b-accent-text); opacity:.8; }
+  .l2b-feature:hover .l2b-feature-go { opacity:1; }
+
+  .l2b-home-people { display:flex; gap:14px; flex-wrap:wrap; }
+  .l2b-mini-person { display:flex; align-items:center; gap:13px; flex:1 1 250px;
+    background:var(--l2b-glass-2); border:1px solid var(--l2b-glass-border); border-radius:14px; padding:12px 15px;
+    box-shadow:inset 0 1px 0 var(--l2b-glass-highlight); }
+  .l2b-mini-photo { width:56px; height:56px; border-radius:50%; object-fit:cover; flex:none;
+    border:1px solid var(--l2b-glass-border); box-shadow:0 4px 12px rgba(20,20,40,.22); }
+  .l2b-mini-name { font-size:14px; font-weight:750; color:var(--l2b-text); }
+  .l2b-mini-role { font-size:12px; color:var(--l2b-text-muted); margin-top:1px; }
+
+  @media (prefers-reduced-motion: reduce) { .l2b-waves .parallax use { animation:none; } }
+  @media (max-width:640px) { .l2b-hero-title { font-size:46px; } .l2b-hero-inner { padding:42px 28px 112px; } }
 "
 
 # Client-side theme toggle (instant, no server round-trip needed to repaint the
