@@ -152,7 +152,7 @@ panel_primers_qpcr <- function(a, js, col = LIGHT_COL) {
   dn_bd <- if (identical(js$junction, "cryptic")) COL$ce else COL$exon
   dn_tx <- if (identical(js$junction, "cryptic")) COL$ce_dk else COL$exon_dk
 
-  s <- c('<svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg" ',
+  s <- c('<svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg" ',
          'font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" role="img" ',
          'aria-label="Junction-spanning qPCR primer on the spliced transcript">')
   # two exons drawn adjacent (as in the mRNA), sharing the junction at jx

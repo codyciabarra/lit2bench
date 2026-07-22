@@ -673,12 +673,12 @@ panel_dil <- function() {
 panel_pcr <- function() {
   layout_columns(col_widths = c(5, 7),
     div(
-      l2b_card(1, "Pooled components", "Go into the master mix. Stock and final concentration, same units.",
+      l2b_card(1, "Pooled components", "Go into the master mix. Give each row's stock & final in its own unit (X, µM, …) — only their ratio is used.",
         l2b_grid_ui("pcr_pool_g", "+ Add component")),
       l2b_card(2, "Per-tube components", "Added individually (e.g. template) — not pooled.",
         l2b_grid_ui("pcr_fix_g", "+ Add component")),
       l2b_card(3, "Reaction setup", NULL,
-        fluidRow(column(6, numericInput("pcr_final_vol", "Reaction volume (uL)", value = 25)),
+        fluidRow(column(6, numericInput("pcr_final_vol", "Reaction volume (µL)", value = 25)),
                  column(6, numericInput("pcr_num_rxn", "Number of reactions", value = 8, min = 1))),
         numericInput("pcr_excess", "Master-mix excess (1.1 = 10% extra)", value = 1.1, min = 1, step = 0.05),
         br(),
@@ -802,11 +802,12 @@ server <- function(input, output, session) {
   pcr_pool_grid <- l2b_grid_server("pcr_pool_g", input, output, session,
     data.frame(Component = c("2X Master Mix", "FWD primer", "REV primer"),
                `Stock conc` = c(2, 10, 10), `Final conc` = c(1, 0.5, 0.5),
+               Unit = c("X", "µM", "µM"),
                check.names = FALSE, stringsAsFactors = FALSE),
-    function(n) list(sprintf("component_%d", n), NA_real_, NA_real_))
+    function(n) list(sprintf("component_%d", n), NA_real_, NA_real_, "µM"))
 
   pcr_fix_grid <- l2b_grid_server("pcr_fix_g", input, output, session,
-    data.frame(Component = "Template", `Volume (uL)` = 1, check.names = FALSE, stringsAsFactors = FALSE),
+    data.frame(Component = "Template", `Volume (µL)` = 1, check.names = FALSE, stringsAsFactors = FALSE),
     function(n) list(sprintf("component_%d", n), NA_real_))
 
   plasmid_grid <- l2b_grid_server("plasmid_g", input, output, session,
@@ -1347,6 +1348,7 @@ server <- function(input, output, session) {
     df <- data.frame(
       Component = c("2X Master Mix", "FWD primer", "REV primer"),
       `Stock conc` = c(2, 10, 10), `Final conc` = c(1, 0.5, 0.5),
+      Unit = c("X", "µM", "µM"),
       check.names = FALSE, stringsAsFactors = FALSE)
     pcr_pool_grid(df)
     DT::replaceData(DT::dataTableProxy("pcr_pool_g"), df, resetPaging = FALSE, rownames = FALSE)
