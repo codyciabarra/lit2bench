@@ -72,7 +72,8 @@ TOOLS <- list(
   list(id = "norm",     label = "Protein Normalization", icon = "⚖️", group = "Calculators"),
   list(id = "a280",     label = "A280 Calculator",    icon = "\U0001f9eb", group = "Calculators"),
   list(id = "pp",       label = "Protein Parameters", icon = "\U0001f9ec", group = "Calculators"),
-  list(id = "dil",      label = "Dilution Calculator", icon = "\U0001f4a7", group = "Calculators")
+  list(id = "dil",      label = "Dilution Calculator", icon = "\U0001f4a7", group = "Calculators"),
+  list(id = "about",    label = "About",              icon = "\U0001f464", group = "About")
 )
 TOOL_BY_ID <- setNames(TOOLS, sapply(TOOLS, `[[`, "id"))
 
@@ -96,7 +97,8 @@ TOOL_ABOUT <- list(
   norm    = "Works out lysate / water / dye volumes for equal-protein-mass loading.",
   a280    = "Converts A280 absorbance to concentration via Beer-Lambert, using your extinction coefficient and MW.",
   pp      = "Computes MW, pI, and extinction coefficient directly from an amino-acid sequence.",
-  dil     = "Solves C1V1 = C2V2 for stock volume and diluent volume."
+  dil     = "Solves C1V1 = C2V2 for stock volume and diluent volume.",
+  about   = "Who built Lit2Bench, and the lab behind the cryptic-splicing biology it targets."
 )
 TOOL_RELATED <- list(
   notebook = c("design", "pcr"),
@@ -107,7 +109,8 @@ TOOL_RELATED <- list(
   pcr = c("design", "qpcr"),
   qpcr = c("dens", "sc"), dens = c("norm", "sc"), sc = c("norm", "a280"),
   report = c("design", "qpcr"),
-  norm = c("a280", "dil"), a280 = c("pp", "dil"), pp = c("a280", "dil"), dil = c("pcr", "norm")
+  norm = c("a280", "dil"), a280 = c("pp", "dil"), pp = c("a280", "dil"), dil = c("pcr", "norm"),
+  about = c("notebook", "cryptic")
 )
 
 l2b_generic_aside <- function(id, status_ui) {
@@ -439,6 +442,42 @@ panel_notebook <- function() {
   )
 }
 
+# -------------------------------------------------------------- PANEL: ABOUT
+panel_about <- function() {
+  person <- function(photo, name, role, blurb, lead = FALSE) {
+    div(class = if (lead) "l2b-person l2b-person-lead" else "l2b-person",
+      tags$img(class = if (lead) "l2b-person-photo l2b-person-photo-lg" else "l2b-person-photo",
+               src = photo, alt = name),
+      div(class = "l2b-person-body",
+        div(class = "l2b-person-name", name),
+        div(class = "l2b-person-role", role),
+        p(class = "l2b-person-blurb", blurb)))
+  }
+  div(class = "l2b-about",
+    div(class = "l2b-about-hero",
+      h1(class = "l2b-about-title", "Lit2Bench"),
+      p(class = "l2b-about-tag",
+        "A bench toolkit for splicing & molecular biology — built around detecting and designing assays for TDP-43-driven cryptic exons.")),
+
+    l2b_card(NULL, "Built by", NULL,
+      person("about/me.jpg", "Cody Ciabarra", "Research Intern · Programmer · Gitler Lab, Stanford University",
+             paste("Programmer behind Lit2Bench — designed and built the whole toolkit, from transcript",
+                   "exploration and primer design to gel sizing, qPCR analysis, and the electronic lab notebook."),
+             lead = TRUE)),
+
+    l2b_card(NULL, "The lab",
+      "The cryptic-splicing biology this toolkit detects and designs assays for comes from the Gitler Lab at Stanford.",
+      div(class = "l2b-people",
+        person("about/gitler.jpg", "Aaron D. Gitler, Ph.D.", "Professor of Genetics · Lab supervisor",
+               paste("Principal investigator and lab supervisor. The Gitler lab studies the genetics of",
+                     "neurodegeneration — ALS, TDP-43 proteinopathy, and the cryptic splicing this toolkit is built to find and validate.")),
+        person("about/yi_zeng.jpg", "Yi Zeng, Ph.D.", "Postdoctoral Fellow · Code mentor",
+               "Postdoctoral fellow in the Gitler Lab and mentor for the development of Lit2Bench.")),
+      div(class = "l2b-about-foot",
+        tags$a(href = "https://gitlerlab.org", target = "_blank", rel = "noopener", "gitlerlab.org")))
+  )
+}
+
 # ---------------------------------------------------- PANEL: NORMALIZATION
 panel_norm <- function() {
   layout_columns(col_widths = c(5, 7),
@@ -564,7 +603,8 @@ ui <- page_fluid(
         tabPanel("norm", panel_norm()),
         tabPanel("a280", panel_a280()),
         tabPanel("pp", panel_pp()),
-        tabPanel("dil", panel_dil())
+        tabPanel("dil", panel_dil()),
+        tabPanel("about", panel_about())
       )),
     div(class = "l2b-col-aside", uiOutput("aside_out"))
   )
@@ -2374,6 +2414,8 @@ server <- function(input, output, session) {
                 nrow(r$summary), sum(r$summary$status == "hit"))),
       qpcr = status_row(qpcr_res(), qpcr_err(), function(r)
         sprintf("%d sample(s) analyzed vs. %s", nrow(r$samples), r$calibrator)),
+      about = div(class = "l2b-aside-note",
+        "The Gitler Lab, Stanford — ", tags$a(href = "https://gitlerlab.org", target = "_blank", rel = "noopener", "gitlerlab.org")),
       notebook = {
         id <- nb_open_id()
         if (is.null(id)) div(class = "l2b-aside-note", "Create or open an entry, then Save to persist it to disk.")

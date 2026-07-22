@@ -512,6 +512,26 @@ L2B_CSS <- "
   .nb-table-tools { display:inline-flex; gap:6px; flex-wrap:wrap; }
   .nb-savebar { display:flex; align-items:center; gap:14px; margin:4px 0 6px; flex-wrap:wrap; }
   .nb-save-status { font-size:13px; color:var(--l2b-text-muted); }
+
+  /* ================= ABOUT ================= */
+  .l2b-about-hero { padding:8px 4px 14px; }
+  .l2b-about-title { font-size:34px; font-weight:800; letter-spacing:-.5px; margin:0 0 6px; line-height:1.05;
+    background:var(--l2b-accent-grad); -webkit-background-clip:text; background-clip:text;
+    -webkit-text-fill-color:transparent; color:transparent; }
+  .l2b-about-tag { font-size:15px; color:var(--l2b-text-muted); max-width:660px; line-height:1.55; margin:0; }
+  .l2b-people { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  @media (max-width:820px) { .l2b-people { grid-template-columns:1fr; } }
+  .l2b-person { display:flex; gap:16px; align-items:flex-start; }
+  .l2b-person-lead { gap:22px; align-items:center; }
+  .l2b-person-photo { width:104px; height:104px; border-radius:18px; object-fit:cover; flex:none;
+    border:1px solid var(--l2b-glass-border);
+    box-shadow:0 8px 22px rgba(20,20,40,.28), inset 0 1px 0 var(--l2b-glass-highlight); }
+  .l2b-person-photo-lg { width:150px; height:150px; border-radius:24px; }
+  .l2b-person-name { font-size:17px; font-weight:800; color:var(--l2b-text); }
+  .l2b-person-lead .l2b-person-name { font-size:21px; }
+  .l2b-person-role { font-size:13px; font-weight:600; color:var(--l2b-accent-text); margin-top:3px; }
+  .l2b-person-blurb { font-size:13.5px; color:var(--l2b-text-muted); line-height:1.55; margin:9px 0 0; }
+  .l2b-about-foot { margin-top:16px; font-size:13.5px; font-weight:600; }
 "
 
 # Client-side theme toggle (instant, no server round-trip needed to repaint the
