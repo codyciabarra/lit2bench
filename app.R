@@ -2077,10 +2077,12 @@ server <- function(input, output, session) {
   nb_open_created <- reactiveVal(NULL)
   nb_ntables      <- reactiveVal(0L)
   nb_dirty        <- reactiveVal(FALSE)
+  nb_loading      <- reactiveVal(FALSE)   # suppresses the dirty flag during a load's input echo
   nb_refresh      <- reactiveVal(0)
   nb_status_msg   <- reactiveVal("")
   nb_tbl_rv       <- lapply(seq_len(NB_MAX_TABLES), function(i) reactiveVal(NULL))
   nb_tbl_struct   <- lapply(seq_len(NB_MAX_TABLES), function(i) reactiveVal(0L))
+  nb_tbl_name     <- lapply(seq_len(NB_MAX_TABLES), function(i) reactiveVal(""))  # server-authoritative table names
 
   output$nb_ntables <- reactive(nb_ntables())
   outputOptions(output, "nb_ntables", suspendWhenHidden = FALSE)
@@ -2091,10 +2093,11 @@ server <- function(input, output, session) {
   nb_collect_tables <- function() {
     n <- nb_ntables(); if (n == 0) return(list())
     lapply(seq_len(n), function(i)
-      list(name = input[[paste0("nb_tname_", i)]] %||% sprintf("Table %d", i),
+      list(name = { nm <- nb_tbl_name[[i]](); if (nzchar(nm)) nm else sprintf("Table %d", i) },
            df   = nb_tbl_rv[[i]]() %||% nb_blank_table()$df))
   }
   nb_load_editor <- function(doc) {
+    nb_loading(TRUE)                       # the input echoes below must not mark the entry dirty
     nb_open_id(doc$id); nb_open_kind(doc$kind)
     nb_open_from(doc$from_procedure); nb_open_created(doc$created)
     updateTextInput(session, "nb_title", value = doc$title %||% "")
@@ -2103,9 +2106,10 @@ server <- function(input, output, session) {
     nt <- min(length(doc$tables), NB_MAX_TABLES)
     for (i in seq_len(NB_MAX_TABLES)) {
       if (i <= nt) {
-        updateTextInput(session, paste0("nb_tname_", i), value = doc$tables[[i]]$name %||% sprintf("Table %d", i))
+        nm <- doc$tables[[i]]$name %||% sprintf("Table %d", i)
+        nb_tbl_name[[i]](nm); updateTextInput(session, paste0("nb_tname_", i), value = nm)
         nb_tbl_rv[[i]](doc$tables[[i]]$df)
-      } else nb_tbl_rv[[i]](NULL)
+      } else { nb_tbl_name[[i]](""); nb_tbl_rv[[i]](NULL) }
       nb_tbl_struct[[i]](isolate(nb_tbl_struct[[i]]()) + 1L)
     }
     nb_ntables(nt); nb_dirty(FALSE)
@@ -2115,10 +2119,11 @@ server <- function(input, output, session) {
     n <- nb_ntables(); if (k > n) return(invisible())
     if (k < n) for (j in k:(n - 1)) {
       nb_tbl_rv[[j]](nb_tbl_rv[[j + 1]]())
-      updateTextInput(session, paste0("nb_tname_", j), value = input[[paste0("nb_tname_", j + 1)]] %||% "")
+      nb_tbl_name[[j]](nb_tbl_name[[j + 1]]())
+      updateTextInput(session, paste0("nb_tname_", j), value = nb_tbl_name[[j + 1]]())
       nb_tbl_struct[[j]](isolate(nb_tbl_struct[[j]]()) + 1L)
     }
-    nb_tbl_rv[[n]](NULL); nb_tbl_struct[[n]](isolate(nb_tbl_struct[[n]]()) + 1L)
+    nb_tbl_rv[[n]](NULL); nb_tbl_name[[n]](""); nb_tbl_struct[[n]](isolate(nb_tbl_struct[[n]]()) + 1L)
     nb_ntables(n - 1L); nb_dirty(TRUE)
   }
 
@@ -2151,13 +2156,18 @@ server <- function(input, output, session) {
         nb_tbl_struct[[ii]](isolate(nb_tbl_struct[[ii]]()) + 1L); nb_dirty(TRUE) }
     })
     observeEvent(input[[paste0("nb_tdel_", ii)]], nb_remove_table(ii))
+    # keep the server-side name in sync with the field (idempotent on load echo)
+    observeEvent(input[[paste0("nb_tname_", ii)]],
+                 nb_tbl_name[[ii]](input[[paste0("nb_tname_", ii)]] %||% ""), ignoreInit = TRUE)
   })
 
-  # picker choices refresh on kind change or after save/delete
+  # picker choices refresh on kind change or after save/delete; keep the
+  # currently-open entry selected whenever it belongs to the shown kind.
   observeEvent(list(input$nb_kind, nb_refresh()), {
     df <- nb_list(input$nb_kind %||% "procedure")
     ch <- if (nrow(df) == 0) character(0) else setNames(df$id, sprintf("%s  ·  %s", df$title, df$date))
-    updateSelectInput(session, "nb_pick", choices = ch)
+    sel <- if (!is.null(nb_open_id()) && nb_open_id() %in% df$id) nb_open_id() else NULL
+    updateSelectInput(session, "nb_pick", choices = ch, selected = sel)
   })
 
   observeEvent(input$nb_open, {
@@ -2180,8 +2190,9 @@ server <- function(input, output, session) {
   observeEvent(input$nb_add_table, {
     if (nb_ntables() >= NB_MAX_TABLES) { nb_status_msg(sprintf("Up to %d tables per entry.", NB_MAX_TABLES)); return() }
     i <- nb_ntables() + 1L
-    updateTextInput(session, paste0("nb_tname_", i), value = sprintf("Table %d", i))
-    nb_tbl_rv[[i]](nb_blank_table(sprintf("Table %d", i))$df)
+    nm <- sprintf("Table %d", i)
+    nb_tbl_name[[i]](nm); updateTextInput(session, paste0("nb_tname_", i), value = nm)
+    nb_tbl_rv[[i]](nb_blank_table(nm)$df)
     nb_tbl_struct[[i]](isolate(nb_tbl_struct[[i]]()) + 1L)
     nb_ntables(i); nb_dirty(TRUE)
   })
@@ -2203,18 +2214,33 @@ server <- function(input, output, session) {
     path <- tryCatch(nb_save(doc), error = function(e) { nb_status_msg(paste("Save failed:", conditionMessage(e))); NULL })
     if (is.null(path)) return()
     nb_open_id(sub("\\.json$", "", basename(path)))
-    nb_dirty(FALSE); nb_refresh(nb_refresh() + 1)
-    if (identical(input$nb_kind, kind)) updateSelectInput(session, "nb_pick", selected = nb_open_id())
+    nb_dirty(FALSE)
+    # surface the saved entry: switch the picker to its kind (the picker observer
+    # then rebuilds the list and re-selects the open id) so it's never hidden.
+    updateRadioButtons(session, "nb_kind", selected = kind)
+    nb_refresh(nb_refresh() + 1)
     nb_status_msg(sprintf("Saved “%s” to lab_notebook/%ss/", title, kind))
   })
-  observeEvent(list(input$nb_title, input$nb_objective, input$nb_reagents,
-                    input$nb_setup, input$nb_results, input$nb_conclusions),
-               nb_dirty(TRUE), ignoreInit = TRUE)
+  # any user edit marks the entry dirty -- but the input echoes that a load
+  # pushes are swallowed by the nb_loading guard (set in nb_load_editor), so
+  # opening a saved entry doesn't spuriously show "unsaved changes".
+  observeEvent(list(input$nb_title, input$nb_date, input$nb_objective, input$nb_reagents,
+                    input$nb_setup, input$nb_results, input$nb_conclusions,
+                    input$nb_tname_1, input$nb_tname_2, input$nb_tname_3,
+                    input$nb_tname_4, input$nb_tname_5, input$nb_tname_6), {
+    if (isTRUE(nb_loading())) { nb_loading(FALSE); return() }
+    nb_dirty(TRUE)
+  }, ignoreInit = TRUE)
 
-  # open the example procedure once on session start so the editor isn't blank
+  # open something on session start so the editor isn't blank: the seeded
+  # example if present, else the most-recent procedure, else a fresh blank one.
   observe(isolate({
     ex <- tryCatch(nb_load("procedure", "proc_example_competition_pcr"), error = function(e) NULL)
-    if (!is.null(ex)) nb_load_editor(ex)
+    if (is.null(ex)) {
+      procs <- nb_list("procedure")
+      if (nrow(procs) > 0) ex <- tryCatch(nb_load("procedure", procs$id[1]), error = function(e) NULL)
+    }
+    nb_load_editor(ex %||% nb_blank_doc("procedure", ""))
   }))
 
   # ---- NORMALIZATION ----

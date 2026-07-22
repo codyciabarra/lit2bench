@@ -711,18 +711,27 @@ L2B_JS <- "
     requestAnimationFrame(step);
   }
   function scanCounts(root){ (root || document).querySelectorAll('.l2b-stat-value').forEach(countUp); }
-  scanCounts();
-  new MutationObserver(function(muts){
-    for (var i = 0; i < muts.length; i++) {
-      var added = muts[i].addedNodes;
-      for (var j = 0; j < added.length; j++) {
-        var n = added[j];
-        if (n.nodeType !== 1) continue;
-        if (n.classList && n.classList.contains('l2b-stat-value')) countUp(n);
-        if (n.querySelectorAll) scanCounts(n);
+  // Deferred to DOMContentLoaded: this IIFE runs from <head>, where document.body
+  // is still null. Scope the observer to the results column (where stat tiles
+  // render) rather than the whole document, so nav/aside/topbar churn doesn't
+  // wake the callback.
+  function initCounts(){
+    var root = document.querySelector('.l2b-col-main') || document.body;
+    if (!root) return;
+    scanCounts(root);
+    new MutationObserver(function(muts){
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var n = added[j];
+          if (n.nodeType !== 1) continue;
+          if (n.classList && n.classList.contains('l2b-stat-value')) countUp(n);
+          if (n.querySelectorAll) scanCounts(n);
+        }
       }
-    }
-  }).observe(document.body, {childList:true, subtree:true});
+    }).observe(root, {childList:true, subtree:true});
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initCounts); else initCounts();
 })();
 "
 
