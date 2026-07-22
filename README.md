@@ -34,7 +34,10 @@ page; pick a tool from the left nav.
   retention in an IGV-style sashimi plot. Double-click to zoom.
 - **Design** — Transcript Explorer, Exon Extractor, Primer & Schematic designer,
   Panel Runner (batch cryptic detection), Plasmid Creator, Gibson Assembly primer
-  designer, PCR Setup calculator.
+  designer, PCR Setup calculator, and **Plasmid QC** — align Plasmidsaurus reads
+  against a reference plasmid with PASS/GENE_FOUND/FLAGGED grading, mutation/indel
+  calling, and NCBI screening of unmatched flanks (ported from
+  [GeneAlign](https://github.com/alexluu88/GeneAlignProject)).
 - **Analysis** — qPCR (2^−ΔΔCt) with QC warnings, Densitometry, Standard Curve,
   Methods & Ordering (auto-assembled ordering sheet + references + Methods
   paragraph).
@@ -49,6 +52,7 @@ rather than failing silently.
 |-----|---------|
 | Primer design (`primer3_core` on PATH) | `brew install primer3` |
 | Cryptic Engine BAM I/O | `BiocManager::install(c("Rsamtools", "GenomicAlignments"))` |
+| Plasmid QC pairwise alignment | `BiocManager::install("pwalign")` |
 | PDF export of figures | a local Chrome/Chromium/Edge (headless print-to-PDF) |
 | Local-model interpretation | [`httr`] + [Ollama](https://ollama.ai) running locally (`ollama serve`, then `ollama pull qwen3:8b`) |
 

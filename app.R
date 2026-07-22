@@ -44,6 +44,13 @@ source("R/batch_loci.R")
 source("R/gibson_design.R")
 source("R/reporting.R")
 source("R/notebook.R")
+source("R/gene_align.R")
+
+# Bundled reference plasmid for the Plasmid QC tool (ported from GeneAlign);
+# prefills the reference box so the tool is usable out of the box.
+PQC_REF_DEFAULT <- tryCatch(
+  paste(readLines("references/pLV_hSyn_mEGFP_linker_hAGGF1.fasta", warn = FALSE), collapse = "\n"),
+  error = function(e) "")
 
 `%||%` <- function(x, default) if (is.null(x) || (length(x) == 1 && is.na(x)) || (is.character(x) && !nzchar(x))) default else x
 
@@ -65,6 +72,7 @@ TOOLS <- list(
   list(id = "batch",    label = "Panel Runner",       icon = "\U0001f5c2", group = "Design"),
   list(id = "plasmid",  label = "Plasmid Creator",    icon = "\U0001f504", group = "Design"),
   list(id = "gibson",   label = "Gibson Assembly",    icon = "\U0001f517", group = "Design"),
+  list(id = "plasmidqc", label = "Plasmid QC",         icon = "\U0001f50e", group = "Design"),
   list(id = "pcr",      label = "PCR Setup",          icon = "\U0001f9ea", group = "Design"),
   list(id = "qpcr",     label = "qPCR (ddCt)",        icon = "\U0001f4c9", group = "Analysis"),
   list(id = "dens",     label = "Densitometry",       icon = "\U0001f4ca", group = "Analysis"),
@@ -107,6 +115,7 @@ TOOL_ABOUT <- list(
   batch   = "Runs the Cryptic Splicing Engine's full detection across a whole list of genes/loci against one BAM pair, returning a row-per-locus summary. Click any row to open that locus in the engine.",
   plasmid = "Joins your parts end-to-end, circularizes them, and draws the resulting map.",
   gibson  = "Designs the primer pairs to Gibson/NEBuilder-assemble an ordered set of DNA fragments — a gene-specific annealing region sized to your target Tm plus the homology tail that builds each junction, for a circular (insert+vector) or linear assembly.",
+  plasmidqc = "QC your Plasmidsaurus (or any) sequencing reads against a reference plasmid: local pairwise alignment on both strands, a PASS / GENE_FOUND / FLAGGED verdict from identity + coverage thresholds, called substitutions/indels and truncations, and unmatched flanks you can screen against NCBI. Ported from Alex Luu's GeneAlign.",
   pcr     = "Scales stock/final concentrations into a master mix for N reactions plus excess.",
   qpcr    = "Calculates ΔΔCt relative expression against a chosen calibrator sample.",
   dens    = "Normalizes target band intensity to a loading control across lanes.",
@@ -124,7 +133,8 @@ TOOL_RELATED <- list(
   explorer = c("extractor", "design"), extractor = c("design", "explorer"),
   design = c("extractor", "cryptic", "plasmid"), cryptic = c("design", "batch"),
   batch = c("cryptic", "design"),
-  plasmid = c("gibson", "design"), gibson = c("plasmid", "pcr"),
+  plasmid = c("gibson", "plasmidqc"), gibson = c("plasmid", "pcr"),
+  plasmidqc = c("plasmid", "gibson"),
   pcr = c("design", "qpcr"),
   qpcr = c("dens", "sc"), dens = c("norm", "sc"), sc = c("norm", "a280"),
   report = c("design", "qpcr"),
@@ -328,6 +338,27 @@ panel_gibson <- function() {
         actionButton("gibson_go", "Design primers", class = "btn-run"))
     ),
     div(uiOutput("gibson_out"))
+  )
+}
+
+# -------------------------------------------------------- PANEL: PLASMID QC
+panel_plasmidqc <- function() {
+  layout_columns(col_widths = c(5, 7),
+    div(
+      l2b_card(1, "Reference plasmid(s)", "FASTA of the plasmid you expect. The bundled pLV-hSyn-mEGFP-AGGF1 example is loaded by default.",
+        textAreaInput("pqc_ref", NULL, value = PQC_REF_DEFAULT, rows = 6, resize = "vertical")),
+      l2b_card(2, "Sequencing reads", "FASTA of your Plasmidsaurus reads to QC against the reference. Both strands are checked.",
+        textAreaInput("pqc_query", NULL, rows = 6, resize = "vertical",
+                      placeholder = ">read_1\nACGTACGT...")),
+      l2b_card(3, "Thresholds", NULL,
+        fluidRow(column(6, numericInput("pqc_identity", "Min identity (%)", value = 95, min = 0, max = 100)),
+                 column(6, numericInput("pqc_coverage", "Min coverage (%)", value = 90, min = 0, max = 100))),
+        numericInput("pqc_minfrag", "Min unmatched fragment (bp)", value = 50, min = 10),
+        textInput("pqc_email", "NCBI email (for optional flank screening)", value = ""),
+        br(),
+        actionButton("pqc_go", "Run QC", class = "btn-run"))
+    ),
+    div(uiOutput("pqc_out"))
   )
 }
 
@@ -676,6 +707,7 @@ ui <- page_fluid(
         tabPanel("batch", panel_batch()),
         tabPanel("plasmid", panel_plasmid()),
         tabPanel("gibson", panel_gibson()),
+        tabPanel("plasmidqc", panel_plasmidqc()),
         tabPanel("pcr", panel_pcr()),
         tabPanel("qpcr", panel_qpcr()),
         tabPanel("dens", panel_dens()),
@@ -1816,6 +1848,118 @@ server <- function(input, output, session) {
     filename = function() "gibson_junctions.csv",
     content = function(f) write.csv(gibson_res()$junctions, f, row.names = FALSE))
 
+  # ---- PLASMID QC (ported from GeneAlign) ----
+  pqc_res <- reactiveVal(NULL); pqc_err <- reactiveVal(NULL); pqc_ncbi <- reactiveVal(NULL)
+  observeEvent(input$pqc_go, {
+    pqc_err(NULL); pqc_res(NULL); pqc_ncbi(NULL)
+    out <- tryCatch({
+      refs <- ga_parse_fasta(input$pqc_ref)
+      queries <- ga_parse_fasta(input$pqc_query)
+      if (length(refs) == 0) stop("Paste at least one reference plasmid in FASTA format.")
+      if (length(queries) == 0) stop("Paste at least one sequencing read in FASTA format.")
+      idt <- input$pqc_identity; cov <- input$pqc_coverage; mf <- as.integer(input$pqc_minfrag)
+      qcs <- lapply(queries, function(q) ga_qc_query(q, refs, idt, cov, mf))
+      list(qcs = qcs, refs = refs)
+    }, error = function(e) e)
+    if (inherits(out, "error")) pqc_err(conditionMessage(out)) else pqc_res(out)
+  })
+
+  # verdict + mutation + flank tables assembled from the QC results
+  pqc_verdicts <- reactive({
+    r <- pqc_res(); req(r)
+    do.call(rbind, lapply(r$qcs, function(qc) data.frame(
+      Read = qc$query_id, `Best reference` = qc$best$reference_id, Status = qc$status,
+      `Identity %` = round(qc$best$identity_pct, 1), `Query cov %` = round(qc$best$query_coverage_pct, 1),
+      `Ref cov %` = round(qc$best$reference_coverage_pct, 1), Strand = qc$best$query_strand,
+      check.names = FALSE, stringsAsFactors = FALSE)))
+  })
+  pqc_mutations <- reactive({
+    r <- pqc_res(); req(r)
+    rows <- lapply(r$qcs, function(qc) {
+      m <- qc$mutations; if (nrow(m) == 0) return(NULL)
+      data.frame(Read = qc$query_id, Position = m$ref_position,
+                 Change = sprintf("%s: %s→%s", m$kind, m$ref_base, m$query_base),
+                 Length = m$length, check.names = FALSE, stringsAsFactors = FALSE)
+    })
+    rows <- Filter(Negate(is.null), rows)
+    if (length(rows) == 0) return(NULL)
+    do.call(rbind, rows)
+  })
+  pqc_flanks <- reactive({
+    r <- pqc_res(); req(r)
+    fl <- list()
+    for (qc in r$qcs) for (f in qc$flanks)
+      fl[[length(fl) + 1]] <- list(read = qc$query_id, tag = f$tag, len = nchar(f$seq), seq = f$seq)
+    fl
+  })
+
+  # optional, blocking: BLAST the unmatched flanks against NCBI + resolve genes
+  observeEvent(input$pqc_ncbi, {
+    fl <- pqc_flanks(); req(length(fl) > 0)
+    email <- trimws(input$pqc_email %||% "")
+    withProgress(message = "Screening flanks on NCBI (this can take minutes)", value = 0, {
+      out <- lapply(seq_along(fl), function(i) {
+        incProgress(1 / length(fl), detail = sprintf("%s (%d/%d)", fl[[i]]$tag, i, length(fl)))
+        hits <- tryCatch(ga_blast_ncbi(fl[[i]]$seq, identity_threshold = 80, max_hits = 3),
+                         error = function(e) e)
+        if (inherits(hits, "error")) return(data.frame(Flank = fl[[i]]$tag, Result = conditionMessage(hits), stringsAsFactors = FALSE))
+        if (nrow(hits) == 0) return(data.frame(Flank = fl[[i]]$tag, Result = "No confident NCBI hit", stringsAsFactors = FALSE))
+        do.call(rbind, lapply(seq_len(nrow(hits)), function(k) {
+          gs <- ga_gene_for_accession(hits$accession[k], email)
+          data.frame(Flank = fl[[i]]$tag, Accession = hits$accession[k],
+                     Gene = gs[1] %||% "—", `Hit` = substr(hits$description[k], 1, 60),
+                     `Identity %` = hits$identity_pct[k], `E-value` = hits$e_value[k],
+                     check.names = FALSE, stringsAsFactors = FALSE)
+        }))
+      })
+    })
+    pqc_ncbi(do.call(rbind, lapply(out, function(d) { d[setdiff(c("Flank","Accession","Gene","Hit","Identity %","E-value","Result"), names(d))] <- NA; d })))
+  })
+
+  output$pqc_out <- renderUI({
+    if (!is.null(pqc_err())) return(div(class = "l2b-card", l2b_err(pqc_err())))
+    if (is.null(pqc_res())) return(div(class = "l2b-card", l2b_empty("\U0001f50e", "No QC run yet", "Paste a reference and your reads, then Run QC.")))
+    v <- pqc_verdicts(); nfl <- length(pqc_flanks())
+    n_pass <- sum(v$Status == "PASS"); n_gene <- sum(v$Status == "GENE_FOUND"); n_flag <- sum(v$Status == "FLAGGED")
+    tagList(
+      div(class = "l2b-card",
+        div(class = "l2b-card-title", "QC verdicts"),
+        l2b_hero(
+          l2b_stat("Reads", nrow(v), "checked"),
+          l2b_stat("PASS", n_pass, "full match", if (n_pass > 0) "good" else ""),
+          l2b_stat("Gene found", n_gene, "insert in backbone"),
+          l2b_stat("Flagged", n_flag, "no confident match", if (n_flag > 0) "bad" else "")),
+        DTOutput("pqc_verdict_tbl")),
+      if (!is.null(pqc_mutations())) div(class = "l2b-card",
+        div(class = "l2b-card-title", "Mutations & indels"),
+        p(class = "l2b-card-sub", "Differences within the aligned region, in reference coordinates."),
+        DTOutput("pqc_mut_tbl")),
+      if (nfl > 0) div(class = "l2b-card",
+        div(class = "l2b-card-title", sprintf("Unmatched flanks (%d)", nfl)),
+        p(class = "l2b-card-sub", "Query regions outside the reference alignment — candidates for unexpected inserts or contamination. Optional NCBI screening is a blocking network call (tens of seconds to minutes)."),
+        DTOutput("pqc_flank_tbl"),
+        div(style = "margin-top:12px;", actionButton("pqc_ncbi", "\U0001f9ec Screen flanks on NCBI", class = "btn-alt", style = "width:auto;")),
+        if (!is.null(pqc_ncbi())) div(style = "margin-top:14px;", DTOutput("pqc_ncbi_tbl")))
+    )
+  })
+  output$pqc_verdict_tbl <- renderDT({
+    datatable(pqc_verdicts(), rownames = FALSE, selection = "none",
+              options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE)) |>
+      formatStyle("Status", fontWeight = "bold",
+                  color = styleEqual(c("PASS", "GENE_FOUND", "FLAGGED"), c("#2fbf71", "#f2a341", "#f2555b")))
+  }, server = FALSE)
+  output$pqc_mut_tbl <- renderDT(datatable(pqc_mutations(), rownames = FALSE, selection = "none",
+    options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE)), server = FALSE)
+  output$pqc_flank_tbl <- renderDT({
+    fl <- pqc_flanks()
+    df <- do.call(rbind, lapply(fl, function(f) data.frame(Read = f$read, Region = f$tag,
+      `Length (bp)` = f$len, `Sequence (5' end)` = paste0(substr(f$seq, 1, 40), if (nchar(f$seq) > 40) "…" else ""),
+      check.names = FALSE, stringsAsFactors = FALSE)))
+    datatable(df, rownames = FALSE, selection = "none", options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE))
+  }, server = FALSE)
+  output$pqc_ncbi_tbl <- renderDT(datatable(pqc_ncbi(), rownames = FALSE, selection = "none",
+    options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE)), server = FALSE)
+
   # ---- qPCR ----
   output$qpcr_calib <- renderUI({
     ch <- qpcr_grid()$Sample
@@ -2524,6 +2668,9 @@ server <- function(input, output, session) {
         sprintf("Master mix for %d reaction(s) ready", r$num_reactions)),
       gibson = status_row(gibson_res(), gibson_err(), function(r)
         sprintf("%d fragment(s), %d junction(s) designed", r$n_fragments, nrow(r$junctions))),
+      plasmidqc = status_row(pqc_res(), pqc_err(), function(r)
+        sprintf("%d read(s) QC'd (%d PASS)", length(r$qcs),
+                sum(vapply(r$qcs, function(q) q$status == "PASS", logical(1))))),
       batch = status_row(batch_res(), batch_err(), function(r)
         sprintf("%d locus/loci scanned, %d with signal",
                 nrow(r$summary), sum(r$summary$status == "hit"))),
