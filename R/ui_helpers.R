@@ -531,6 +531,12 @@ L2B_CSS <- "
   .l2b-person-lead .l2b-person-name { font-size:21px; }
   .l2b-person-role { font-size:13px; font-weight:600; color:var(--l2b-accent-text); margin-top:3px; }
   .l2b-person-blurb { font-size:13.5px; color:var(--l2b-text-muted); line-height:1.55; margin:9px 0 0; }
+  .l2b-person-contact { margin-top:8px; font-size:13.5px; font-weight:600; }
+  .l2b-person-contact a { display:inline-flex; align-items:center; gap:6px; color:var(--l2b-accent-text);
+    text-decoration:none; background:var(--l2b-accent-soft); padding:4px 12px; border-radius:999px;
+    border:1px solid var(--l2b-glass-border); transition:background .15s, transform .15s; }
+  .l2b-person-contact a::before { content:'\\2709'; font-size:12px; }
+  .l2b-person-contact a:hover { background:var(--l2b-surface-hover); transform:translateY(-1px); }
   .l2b-about-foot { margin-top:16px; font-size:13.5px; font-weight:600; }
 "
 

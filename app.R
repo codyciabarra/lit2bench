@@ -444,14 +444,17 @@ panel_notebook <- function() {
 
 # -------------------------------------------------------------- PANEL: ABOUT
 panel_about <- function() {
-  person <- function(photo, name, role, blurb, lead = FALSE) {
+  person <- function(photo, name, role, blurb, lead = FALSE, email = NULL) {
     div(class = if (lead) "l2b-person l2b-person-lead" else "l2b-person",
       tags$img(class = if (lead) "l2b-person-photo l2b-person-photo-lg" else "l2b-person-photo",
                src = photo, alt = name),
       div(class = "l2b-person-body",
         div(class = "l2b-person-name", name),
         div(class = "l2b-person-role", role),
-        p(class = "l2b-person-blurb", blurb)))
+        p(class = "l2b-person-blurb", blurb),
+        if (!is.null(email))
+          div(class = "l2b-person-contact",
+              tags$a(href = paste0("mailto:", email), email))))
   }
   div(class = "l2b-about",
     div(class = "l2b-about-hero",
@@ -463,7 +466,7 @@ panel_about <- function() {
       person("about/me.jpg", "Cody Ciabarra", "Research Intern · Programmer · Gitler Lab, Stanford University",
              paste("Programmer behind Lit2Bench — designed and built the whole toolkit, from transcript",
                    "exploration and primer design to gel sizing, qPCR analysis, and the electronic lab notebook."),
-             lead = TRUE)),
+             lead = TRUE, email = "codyciabarra@gmail.com")),
 
     l2b_card(NULL, "The lab",
       "The cryptic-splicing biology this toolkit detects and designs assays for comes from the Gitler Lab at Stanford.",
