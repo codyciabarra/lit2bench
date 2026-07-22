@@ -495,6 +495,23 @@ L2B_CSS <- "
     .l2b-card::after, .l2b-nav::after, .l2b-aside-card::after { transition:none; }
     .l2b-nav .btn:hover, .btn-run:active, .btn-dl:active, .btn-alt:active, .btn-ghost:active { transform:none; }
   }
+
+  /* ================= LAB NOTEBOOK ================= */
+  .nb-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .nb-editor .l2b-card { margin-bottom:14px; }
+  .nb-badge { margin-top:8px; }
+  .nb-badge > span { display:inline-block; font-size:10.5px; font-weight:800; letter-spacing:.07em;
+    text-transform:uppercase; color:var(--l2b-accent-text); background:var(--l2b-accent-soft);
+    padding:3px 11px; border-radius:999px; }
+  .nb-table { margin:14px 0; padding:12px 14px; border:1px solid var(--l2b-glass-border); border-radius:12px;
+    background:var(--l2b-glass-2); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    box-shadow:inset 0 1px 0 var(--l2b-glass-highlight); }
+  .nb-table-head { display:flex; align-items:center; justify-content:space-between; gap:10px;
+    margin-bottom:10px; flex-wrap:wrap; }
+  .nb-table-head .form-group, .nb-table-head .shiny-input-container { margin:0 !important; }
+  .nb-table-tools { display:inline-flex; gap:6px; flex-wrap:wrap; }
+  .nb-savebar { display:flex; align-items:center; gap:14px; margin:4px 0 6px; flex-wrap:wrap; }
+  .nb-save-status { font-size:13px; color:var(--l2b-text-muted); }
 "
 
 # Client-side theme toggle (instant, no server round-trip needed to repaint the

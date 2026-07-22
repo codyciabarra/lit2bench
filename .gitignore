@@ -5,3 +5,6 @@
 *.bam
 *.bai
 .claude/
+
+# lab notebook (user data -- procedures & experiments saved by the app)
+lab_notebook/

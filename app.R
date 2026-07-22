@@ -43,6 +43,7 @@ source("R/transcript_explorer.R")
 source("R/batch_loci.R")
 source("R/gibson_design.R")
 source("R/reporting.R")
+source("R/notebook.R")
 
 `%||%` <- function(x, default) if (is.null(x) || (length(x) == 1 && is.na(x)) || (is.character(x) && !nzchar(x))) default else x
 
@@ -55,6 +56,7 @@ theme_l2b <- bs_theme(
 
 # tool registry -- id, label, icon, group
 TOOLS <- list(
+  list(id = "notebook", label = "Lab Notebook",      icon = "\U0001f4d3", group = "Notebook"),
   list(id = "explorer", label = "Transcript Explorer", icon = "\U0001f9ed", group = "Design"),
   list(id = "extractor", label = "Exon Extractor",     icon = "\U00002702", group = "Design"),
   list(id = "design",   label = "Primer & Schematic", icon = "\U0001f9ec", group = "Design"),
@@ -78,6 +80,7 @@ TOOL_BY_ID <- setNames(TOOLS, sapply(TOOLS, `[[`, "id"))
 # 2 related tools to jump to -- both genuinely derived from how the tools chain
 # together in a typical workflow.
 TOOL_ABOUT <- list(
+  notebook = "An electronic lab notebook that saves to disk. Procedures are reusable templates (Objective / Reagents / Experimental setup with editable tables / Results / Conclusions); spin up an Experiment from a procedure, fill in your run and results, and Save — entries persist as JSON files you can reopen and edit across sessions.",
   explorer = "Search a gene symbol, RefSeq/Ensembl transcript ID, or a locus and see every annotated isoform in the region -- strand, length, coding status, exon/intron counts, CDS and UTR spans.",
   extractor = "Pulls real exon and intron sequence for a chosen transcript, exports BED/FASTA/CSV/JSON/GTF, and hands a chosen exon straight to the Primer Designer -- no manual coordinate copying.",
   design  = "Designs a junction-spanning primer pair against live reference sequence and shows the expected canonical vs. cryptic-exon product sizes.",
@@ -96,6 +99,7 @@ TOOL_ABOUT <- list(
   dil     = "Solves C1V1 = C2V2 for stock volume and diluent volume."
 )
 TOOL_RELATED <- list(
+  notebook = c("design", "pcr"),
   explorer = c("extractor", "design"), extractor = c("design", "explorer"),
   design = c("extractor", "cryptic", "plasmid"), cryptic = c("design", "batch"),
   batch = c("cryptic", "design"),
@@ -374,6 +378,67 @@ panel_report <- function() {
   )
 }
 
+# ------------------------------------------------------- PANEL: LAB NOTEBOOK
+# One editable-table slot, shown only while in use (conditionalPanel on
+# output.nb_ntables). Stable ids so the DT is never rebuilt -- opening a doc
+# updates its data via replaceData, never by destroying/recreating the output.
+nb_table_slot_ui <- function(i) {
+  conditionalPanel(
+    condition = sprintf("output.nb_ntables >= %d", i),
+    div(class = "nb-table",
+      div(class = "nb-table-head",
+        textInput(paste0("nb_tname_", i), NULL, width = "240px"),
+        div(class = "nb-table-tools",
+          actionButton(paste0("nb_trow_", i), "+ Row", class = "btn-row"),
+          actionButton(paste0("nb_tcol_", i), "+ Col", class = "btn-row"),
+          actionButton(paste0("nb_tdelrow_", i), "\U2212 Row", class = "btn-row"),
+          actionButton(paste0("nb_tdel_", i), "Remove", class = "btn-row"))),
+      DTOutput(paste0("nb_tbl_", i)))
+  )
+}
+
+panel_notebook <- function() {
+  div(
+    l2b_card(1, "Lab notebook",
+      "Procedures are reusable templates; experiments are runs you create from them, fill in, and save. Entries persist to lab_notebook/ as JSON you can reopen and edit.",
+      radioButtons("nb_kind", NULL, c("Procedures" = "procedure", "Experiments" = "experiment"),
+                   selected = "procedure", inline = TRUE),
+      selectInput("nb_pick", NULL, choices = NULL, width = "100%"),
+      div(class = "nb-actions",
+        actionButton("nb_open", "\U0001f4c2 Open", class = "btn-ghost"),
+        conditionalPanel("input.nb_kind == 'procedure'",
+          actionButton("nb_from_proc", "\U0001f9ea New experiment from this", class = "btn-ghost")),
+        actionButton("nb_new_proc", "+ Procedure", class = "btn-ghost"),
+        actionButton("nb_new_exp", "+ Experiment", class = "btn-ghost"),
+        actionButton("nb_delete", "\U0001f5d1 Delete", class = "btn-ghost"))),
+
+    div(class = "nb-editor",
+      l2b_card(NULL, "Entry", NULL,
+        fluidRow(column(8, textInput("nb_title", "Title", width = "100%")),
+                 column(4, textInput("nb_date", "Date", value = nb_today(), width = "100%"))),
+        div(class = "nb-badge", textOutput("nb_kind_label", inline = TRUE))),
+      l2b_card(NULL, "Objective", NULL,
+        textAreaInput("nb_objective", NULL, rows = 2, width = "100%",
+                      placeholder = "What is this experiment testing?")),
+      l2b_card(NULL, "Reagents", NULL,
+        textAreaInput("nb_reagents", NULL, rows = 6, width = "100%",
+                      placeholder = "Samples, primers, kits…")),
+      l2b_card(NULL, "Experimental setup", NULL,
+        textAreaInput("nb_setup", NULL, rows = 6, width = "100%",
+                      placeholder = "Numbered steps. Add tables below for PCR setup, cycling, etc."),
+        lapply(seq_len(NB_MAX_TABLES), nb_table_slot_ui),
+        div(style = "margin-top:8px;",
+          actionButton("nb_add_table", "+ Add table", class = "btn-row"))),
+      l2b_card(NULL, "Results", NULL,
+        textAreaInput("nb_results", NULL, rows = 4, width = "100%")),
+      l2b_card(NULL, "Conclusions & next steps", NULL,
+        textAreaInput("nb_conclusions", NULL, rows = 4, width = "100%")),
+      div(class = "nb-savebar",
+        actionButton("nb_save", "\U0001f4be Save entry", class = "btn-run", style = "width:auto;"),
+        span(class = "nb-save-status", textOutput("nb_save_status", inline = TRUE))))
+  )
+}
+
 # ---------------------------------------------------- PANEL: NORMALIZATION
 panel_norm <- function() {
   layout_columns(col_widths = c(5, 7),
@@ -483,6 +548,7 @@ ui <- page_fluid(
     div(class = "l2b-col-nav", uiOutput("nav_sidebar")),
     div(class = "l2b-col-main",
       tabsetPanel(id = "tool_tabs", type = "hidden",
+        tabPanel("notebook", panel_notebook()),
         tabPanel("explorer", panel_explorer()),
         tabPanel("extractor", panel_extractor()),
         tabPanel("design", panel_design()),
@@ -1871,6 +1937,157 @@ server <- function(input, output, session) {
     filename = function() "methods_references.csv",
     content = function(f) write.csv(session_references(report_used()), f, row.names = FALSE))
 
+  # ======================================================================
+  # LAB NOTEBOOK (procedures + experiments, persisted to lab_notebook/)
+  # ======================================================================
+  nb_bootstrap()                         # ensure dirs + seed example on first run
+
+  nb_open_id      <- reactiveVal(NULL)
+  nb_open_kind    <- reactiveVal("procedure")
+  nb_open_from    <- reactiveVal(NULL)
+  nb_open_created <- reactiveVal(NULL)
+  nb_ntables      <- reactiveVal(0L)
+  nb_dirty        <- reactiveVal(FALSE)
+  nb_refresh      <- reactiveVal(0)
+  nb_status_msg   <- reactiveVal("")
+  nb_tbl_rv       <- lapply(seq_len(NB_MAX_TABLES), function(i) reactiveVal(NULL))
+  nb_tbl_struct   <- lapply(seq_len(NB_MAX_TABLES), function(i) reactiveVal(0L))
+
+  output$nb_ntables <- reactive(nb_ntables())
+  outputOptions(output, "nb_ntables", suspendWhenHidden = FALSE)
+  output$nb_kind_label <- renderText(if (identical(nb_open_kind(), "procedure")) "Procedure · template" else "Experiment")
+  output$nb_save_status <- renderText(nb_status_msg())
+
+  # helpers (defined before the slot loop uses them at click time) ----------
+  nb_collect_tables <- function() {
+    n <- nb_ntables(); if (n == 0) return(list())
+    lapply(seq_len(n), function(i)
+      list(name = input[[paste0("nb_tname_", i)]] %||% sprintf("Table %d", i),
+           df   = nb_tbl_rv[[i]]() %||% nb_blank_table()$df))
+  }
+  nb_load_editor <- function(doc) {
+    nb_open_id(doc$id); nb_open_kind(doc$kind)
+    nb_open_from(doc$from_procedure); nb_open_created(doc$created)
+    updateTextInput(session, "nb_title", value = doc$title %||% "")
+    updateTextInput(session, "nb_date", value = doc$date %||% nb_today())
+    for (s in NB_SECTIONS) updateTextAreaInput(session, paste0("nb_", s), value = doc[[s]] %||% "")
+    nt <- min(length(doc$tables), NB_MAX_TABLES)
+    for (i in seq_len(NB_MAX_TABLES)) {
+      if (i <= nt) {
+        updateTextInput(session, paste0("nb_tname_", i), value = doc$tables[[i]]$name %||% sprintf("Table %d", i))
+        nb_tbl_rv[[i]](doc$tables[[i]]$df)
+      } else nb_tbl_rv[[i]](NULL)
+      nb_tbl_struct[[i]](isolate(nb_tbl_struct[[i]]()) + 1L)
+    }
+    nb_ntables(nt); nb_dirty(FALSE)
+    nb_status_msg(sprintf("Opened “%s”", doc$title %||% doc$id))
+  }
+  nb_remove_table <- function(k) {
+    n <- nb_ntables(); if (k > n) return(invisible())
+    if (k < n) for (j in k:(n - 1)) {
+      nb_tbl_rv[[j]](nb_tbl_rv[[j + 1]]())
+      updateTextInput(session, paste0("nb_tname_", j), value = input[[paste0("nb_tname_", j + 1)]] %||% "")
+      nb_tbl_struct[[j]](isolate(nb_tbl_struct[[j]]()) + 1L)
+    }
+    nb_tbl_rv[[n]](NULL); nb_tbl_struct[[n]](isolate(nb_tbl_struct[[n]]()) + 1L)
+    nb_ntables(n - 1L); nb_dirty(TRUE)
+  }
+
+  # table slots: render once (isolate) + replaceData for edits/rows; bump the
+  # struct signal to force a full re-render only when columns change ---------
+  for (i in seq_len(NB_MAX_TABLES)) local({
+    ii <- i; tid <- paste0("nb_tbl_", ii)
+    output[[tid]] <- DT::renderDT({
+      nb_tbl_struct[[ii]]()                       # dep: re-render on structure change
+      df <- isolate(nb_tbl_rv[[ii]]()); req(df)
+      DT::datatable(df, editable = TRUE, rownames = FALSE, selection = "none",
+                    options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE))
+    }, server = TRUE)
+    observeEvent(input[[paste0(tid, "_cell_edit")]], {
+      info <- input[[paste0(tid, "_cell_edit")]]; df <- nb_tbl_rv[[ii]](); req(df)
+      df[info$row, info$col + 1] <- as.character(info$value); nb_tbl_rv[[ii]](df); nb_dirty(TRUE)
+    })
+    observeEvent(input[[paste0("nb_trow_", ii)]], {
+      df <- nb_tbl_rv[[ii]](); req(df); df[nrow(df) + 1, ] <- as.list(rep("", ncol(df)))
+      nb_tbl_rv[[ii]](df); DT::replaceData(DT::dataTableProxy(tid), df, resetPaging = FALSE, rownames = FALSE); nb_dirty(TRUE)
+    })
+    observeEvent(input[[paste0("nb_tdelrow_", ii)]], {
+      df <- nb_tbl_rv[[ii]](); req(df)
+      if (nrow(df) > 1) { df <- df[-nrow(df), , drop = FALSE]; nb_tbl_rv[[ii]](df)
+        DT::replaceData(DT::dataTableProxy(tid), df, resetPaging = FALSE, rownames = FALSE); nb_dirty(TRUE) }
+    })
+    observeEvent(input[[paste0("nb_tcol_", ii)]], {
+      df <- nb_tbl_rv[[ii]](); req(df)
+      if (ncol(df) < 12) { df[[LETTERS[ncol(df) + 1]]] <- rep("", nrow(df)); nb_tbl_rv[[ii]](df)
+        nb_tbl_struct[[ii]](isolate(nb_tbl_struct[[ii]]()) + 1L); nb_dirty(TRUE) }
+    })
+    observeEvent(input[[paste0("nb_tdel_", ii)]], nb_remove_table(ii))
+  })
+
+  # picker choices refresh on kind change or after save/delete
+  observeEvent(list(input$nb_kind, nb_refresh()), {
+    df <- nb_list(input$nb_kind %||% "procedure")
+    ch <- if (nrow(df) == 0) character(0) else setNames(df$id, sprintf("%s  ·  %s", df$title, df$date))
+    updateSelectInput(session, "nb_pick", choices = ch)
+  })
+
+  observeEvent(input$nb_open, {
+    req(input$nb_pick)
+    doc <- tryCatch(nb_load(input$nb_kind, input$nb_pick),
+                    error = function(e) { nb_status_msg(conditionMessage(e)); NULL })
+    if (!is.null(doc)) nb_load_editor(doc)
+  })
+  observeEvent(input$nb_new_proc, { nb_load_editor(nb_blank_doc("procedure", "")); nb_status_msg("New procedure — edit and Save.") })
+  observeEvent(input$nb_new_exp,  { nb_load_editor(nb_blank_doc("experiment", "")); nb_status_msg("New experiment — edit and Save.") })
+  observeEvent(input$nb_from_proc, {
+    req(input$nb_pick)
+    proc <- tryCatch(nb_load("procedure", input$nb_pick),
+                     error = function(e) { nb_status_msg(conditionMessage(e)); NULL })
+    if (!is.null(proc)) {
+      nb_load_editor(nb_experiment_from_procedure(proc))
+      nb_status_msg(sprintf("New experiment from “%s” — fill in results and Save.", proc$title %||% proc$id))
+    }
+  })
+  observeEvent(input$nb_add_table, {
+    if (nb_ntables() >= NB_MAX_TABLES) { nb_status_msg(sprintf("Up to %d tables per entry.", NB_MAX_TABLES)); return() }
+    i <- nb_ntables() + 1L
+    updateTextInput(session, paste0("nb_tname_", i), value = sprintf("Table %d", i))
+    nb_tbl_rv[[i]](nb_blank_table(sprintf("Table %d", i))$df)
+    nb_tbl_struct[[i]](isolate(nb_tbl_struct[[i]]()) + 1L)
+    nb_ntables(i); nb_dirty(TRUE)
+  })
+  observeEvent(input$nb_delete, {
+    req(input$nb_pick)
+    nb_delete(input$nb_kind, input$nb_pick); nb_refresh(nb_refresh() + 1); nb_status_msg("Deleted.")
+  })
+  observeEvent(input$nb_save, {
+    kind <- nb_open_kind() %||% "experiment"
+    title <- trimws(input$nb_title %||% "")
+    if (!nzchar(title)) { nb_status_msg("Give the entry a title before saving."); return() }
+    doc <- list(
+      id = nb_open_id(), kind = kind, title = title, date = input$nb_date %||% nb_today(),
+      from_procedure = nb_open_from(),
+      objective = input$nb_objective %||% "", reagents = input$nb_reagents %||% "",
+      setup = input$nb_setup %||% "", results = input$nb_results %||% "",
+      conclusions = input$nb_conclusions %||% "",
+      tables = nb_collect_tables(), created = nb_open_created())
+    path <- tryCatch(nb_save(doc), error = function(e) { nb_status_msg(paste("Save failed:", conditionMessage(e))); NULL })
+    if (is.null(path)) return()
+    nb_open_id(sub("\\.json$", "", basename(path)))
+    nb_dirty(FALSE); nb_refresh(nb_refresh() + 1)
+    if (identical(input$nb_kind, kind)) updateSelectInput(session, "nb_pick", selected = nb_open_id())
+    nb_status_msg(sprintf("Saved “%s” to lab_notebook/%ss/", title, kind))
+  })
+  observeEvent(list(input$nb_title, input$nb_objective, input$nb_reagents,
+                    input$nb_setup, input$nb_results, input$nb_conclusions),
+               nb_dirty(TRUE), ignoreInit = TRUE)
+
+  # open the example procedure once on session start so the editor isn't blank
+  observe(isolate({
+    ex <- tryCatch(nb_load("procedure", "proc_example_competition_pcr"), error = function(e) NULL)
+    if (!is.null(ex)) nb_load_editor(ex)
+  }))
+
   # ---- NORMALIZATION ----
   norm_res <- reactiveVal(NULL); norm_err <- reactiveVal(NULL)
   observeEvent(input$norm_go, {
@@ -2157,6 +2374,13 @@ server <- function(input, output, session) {
                 nrow(r$summary), sum(r$summary$status == "hit"))),
       qpcr = status_row(qpcr_res(), qpcr_err(), function(r)
         sprintf("%d sample(s) analyzed vs. %s", nrow(r$samples), r$calibrator)),
+      notebook = {
+        id <- nb_open_id()
+        if (is.null(id)) div(class = "l2b-aside-note", "Create or open an entry, then Save to persist it to disk.")
+        else l2b_aside_status(!nb_dirty(),
+          if (nb_dirty()) sprintf("Unsaved changes — %s", input$nb_title %||% id)
+          else sprintf("Saved — %s", input$nb_title %||% id))
+      },
       dens = status_row(dens_res(), dens_err(), function(r)
         sprintf("%d lane(s) analyzed vs. %s", nrow(r$lanes), r$reference)),
       sc = status_row(sc_res(), sc_err(), function(r)
