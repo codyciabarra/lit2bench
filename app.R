@@ -498,7 +498,7 @@ panel_home <- function() {
         div(class = "l2b-hero-badge", "Bench toolkit for splicing"),
         h1(class = "l2b-hero-title", "Lit2Bench"),
         p(class = "l2b-hero-lead",
-          "Detect TDP-43-driven cryptic exons from RNA-seq, design and validate the assays to confirm them, and keep the whole workflow — from primer to gel to lab notebook — in one place."),
+          "Detect cryptic splicing from RNA-seq — from any knockdown or perturbation — design and validate the assays to confirm it, and keep the whole workflow, from primer to gel to lab notebook, in one place."),
         div(class = "l2b-hero-cta",
           actionButton("home_cta_cryptic", "\U0001f52c  Launch Cryptic Engine", class = "btn-run", style = "width:auto;"),
           actionButton("home_cta_notebook", "\U0001f4d3  Open Lab Notebook", class = "btn-ghost"))),
@@ -537,7 +537,7 @@ panel_about <- function() {
     div(class = "l2b-about-hero",
       h1(class = "l2b-about-title", "Lit2Bench"),
       p(class = "l2b-about-tag",
-        "A bench toolkit for splicing & molecular biology — built around detecting and designing assays for TDP-43-driven cryptic exons.")),
+        "A bench toolkit for splicing & molecular biology — from detecting cryptic exons in RNA-seq to designing and validating the assays that confirm them.")),
 
     l2b_card(NULL, "Built by", NULL,
       person("about/me.jpg", "Cody Ciabarra", "Research Intern · Programmer · Gitler Lab, Stanford University",
