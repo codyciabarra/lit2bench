@@ -342,13 +342,18 @@ panel_gibson <- function() {
 }
 
 # -------------------------------------------------------- PANEL: PLASMID QC
+PQC_ACCEPT <- c(".fasta", ".fa", ".fna", ".gb", ".gbk", ".genbank", ".txt")
 panel_plasmidqc <- function() {
   layout_columns(col_widths = c(5, 7),
     div(
-      l2b_card(1, "Reference plasmid(s)", "FASTA of the plasmid you expect. The bundled pLV-hSyn-mEGFP-AGGF1 example is loaded by default.",
-        textAreaInput("pqc_ref", NULL, value = PQC_REF_DEFAULT, rows = 6, resize = "vertical")),
-      l2b_card(2, "Sequencing reads", "FASTA of your Plasmidsaurus reads to QC against the reference. Both strands are checked.",
-        textAreaInput("pqc_query", NULL, rows = 6, resize = "vertical",
+      l2b_card(1, "Reference plasmid(s)", "Your expected plasmid — upload the FASTA or GenBank (.gbk) straight from Plasmidsaurus, or paste below. GenBank gene/CDS annotations are also matched individually. The bundled pLV-hSyn-mEGFP-AGGF1 example is loaded by default.",
+        fileInput("pqc_ref_files", NULL, multiple = TRUE, accept = PQC_ACCEPT,
+                  buttonLabel = "Upload…", placeholder = "FASTA / GenBank"),
+        textAreaInput("pqc_ref", NULL, value = PQC_REF_DEFAULT, rows = 5, resize = "vertical")),
+      l2b_card(2, "Sequencing reads", "Your Plasmidsaurus reads to QC — upload FASTA/GenBank or paste. Both strands are checked.",
+        fileInput("pqc_query_files", NULL, multiple = TRUE, accept = PQC_ACCEPT,
+                  buttonLabel = "Upload…", placeholder = "FASTA / GenBank"),
+        textAreaInput("pqc_query", NULL, rows = 5, resize = "vertical",
                       placeholder = ">read_1\nACGTACGT...")),
       l2b_card(3, "Thresholds", NULL,
         fluidRow(column(6, numericInput("pqc_identity", "Min identity (%)", value = 95, min = 0, max = 100)),
@@ -356,7 +361,9 @@ panel_plasmidqc <- function() {
         numericInput("pqc_minfrag", "Min unmatched fragment (bp)", value = 50, min = 10),
         textInput("pqc_email", "NCBI email (for optional flank screening)", value = ""),
         br(),
-        actionButton("pqc_go", "Run QC", class = "btn-run"))
+        actionButton("pqc_go", "Run QC", class = "btn-run")),
+      p(class = "l2b-fig-cap", style = "margin-top:4px;",
+        HTML('Ported from <a href="https://github.com/alexluu88/GeneAlignProject" target="_blank" rel="noopener">GeneAlign</a> by Alex Luu.'))
     ),
     div(uiOutput("pqc_out"))
   )
@@ -585,7 +592,11 @@ panel_about <- function() {
         person("about/yi_zeng.jpg", "Yi Zeng, Ph.D.", "Postdoctoral Fellow · Code mentor",
                "Postdoctoral fellow in the Gitler Lab and mentor for the development of Lit2Bench.")),
       div(class = "l2b-about-foot",
-        tags$a(href = "https://gitlerlab.org", target = "_blank", rel = "noopener", "gitlerlab.org")))
+        tags$a(href = "https://gitlerlab.org", target = "_blank", rel = "noopener", "gitlerlab.org"))),
+
+    l2b_card(NULL, "Acknowledgements", NULL,
+      p(class = "l2b-person-blurb", style = "margin:0;",
+        HTML('The Plasmid QC tool is ported from <a href="https://github.com/alexluu88/GeneAlignProject" target="_blank" rel="noopener">GeneAlign</a> by <b>Alex Luu</b>.')))
   )
 }
 
@@ -1850,13 +1861,28 @@ server <- function(input, output, session) {
 
   # ---- PLASMID QC (ported from GeneAlign) ----
   pqc_res <- reactiveVal(NULL); pqc_err <- reactiveVal(NULL); pqc_ncbi <- reactiveVal(NULL)
+  # records from uploaded files (FASTA or GenBank, by extension/content), else
+  # from the pasted textarea -- both feed the same reference-building path.
+  .pqc_records <- function(files, text) {
+    recs <- list()
+    if (!is.null(files) && nrow(files) > 0) {
+      for (i in seq_len(nrow(files))) {
+        txt <- paste(readLines(files$datapath[i], warn = FALSE), collapse = "\n")
+        recs <- c(recs, ga_parse_records(txt, files$name[i]))
+      }
+    } else if (nzchar(trimws(text %||% ""))) {
+      recs <- ga_parse_records(text)
+    }
+    recs
+  }
   observeEvent(input$pqc_go, {
     pqc_err(NULL); pqc_res(NULL); pqc_ncbi(NULL)
     out <- tryCatch({
-      refs <- ga_parse_fasta(input$pqc_ref)
-      queries <- ga_parse_fasta(input$pqc_query)
-      if (length(refs) == 0) stop("Paste at least one reference plasmid in FASTA format.")
-      if (length(queries) == 0) stop("Paste at least one sequencing read in FASTA format.")
+      refs <- .pqc_records(input$pqc_ref_files, input$pqc_ref)
+      queries <- .pqc_records(input$pqc_query_files, input$pqc_query)
+      if (length(refs) == 0) stop("Provide at least one reference plasmid (upload a FASTA/GenBank file or paste one).")
+      if (length(queries) == 0) stop("Provide at least one sequencing read (upload a FASTA/GenBank file or paste one).")
+      refs <- ga_expand_with_gene_features(refs)   # also match annotated genes individually
       idt <- input$pqc_identity; cov <- input$pqc_coverage; mf <- as.integer(input$pqc_minfrag)
       qcs <- lapply(queries, function(q) ga_qc_query(q, refs, idt, cov, mf))
       list(qcs = qcs, refs = refs)

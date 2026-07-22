@@ -24,7 +24,7 @@ ga_parse_fasta <- function(text) {
   lines <- strsplit(text, "[\r\n]+")[[1]]
   recs <- list(); id <- NULL; desc <- ""; seq <- ""
   flush <- function() {
-    if (!is.null(id)) recs[[length(recs) + 1]] <<- list(id = id, description = desc, seq = seq)
+    if (!is.null(id)) recs[[length(recs) + 1]] <<- list(id = id, description = desc, seq = seq, features = list())
     id <<- NULL; desc <<- ""; seq <<- ""
   }
   for (ln in lines) {
@@ -38,6 +38,89 @@ ga_parse_fasta <- function(text) {
   }
   flush()
   recs
+}
+
+#' Parse GenBank text into records list(id, description, seq, features), each
+#' feature list(type, start, end, strand, label) in 1-based coordinates.
+#' Plasmidsaurus emits an annotated GenBank (.gb/.gbk) alongside the FASTA, so
+#' the reference (or reads) can come in either format via ga_parse_records().
+ga_parse_genbank <- function(text) {
+  if (is.null(text) || !nzchar(trimws(text))) return(list())
+  chunks <- strsplit(text, "\n//", fixed = TRUE)[[1]]
+  recs <- list()
+  for (chunk in chunks) {
+    if (!grepl("ORIGIN", chunk)) next
+    lines <- strsplit(chunk, "[\r\n]+")[[1]]
+    locus <- grep("^LOCUS", lines, value = TRUE)
+    id <- if (length(locus)) strsplit(trimws(sub("^LOCUS", "", locus[1])), "\\s+")[[1]][1] else "genbank"
+    defl <- grep("^DEFINITION", lines, value = TRUE)
+    desc <- if (length(defl)) trimws(sub("^DEFINITION", "", defl[1])) else id
+    oi <- which(grepl("^ORIGIN", lines))[1]
+    seq <- if (!is.na(oi) && oi < length(lines))
+      .ga_sanitize(paste(lines[(oi + 1):length(lines)], collapse = "")) else ""
+    fi <- which(grepl("^FEATURES", lines))[1]
+    features <- list(); cur <- NULL
+    flush_f <- function() if (!is.null(cur) && cur$type %in% c("gene", "CDS"))
+      features[[length(features) + 1]] <<- cur
+    if (!is.na(fi) && !is.na(oi) && oi > fi + 1) {
+      for (ln in lines[(fi + 1):(oi - 1)]) {
+        m <- regmatches(ln, regexec("^ {5}(\\S+)\\s+(.+)$", ln))[[1]]
+        if (length(m) == 3) {
+          flush_f()
+          nums <- as.integer(regmatches(m[3], gregexpr("[0-9]+", m[3]))[[1]])
+          cur <- list(type = m[2], start = if (length(nums)) min(nums) else NA_integer_,
+                      end = if (length(nums)) max(nums) else NA_integer_,
+                      strand = if (grepl("complement", m[3])) -1L else 1L, label = NA_character_)
+        } else if (!is.null(cur)) {
+          q <- regmatches(ln, regexec('/(gene|label|locus_tag)="?([^"]*)"?', ln))[[1]]
+          if (length(q) == 3 && is.na(cur$label) && nzchar(q[3])) cur$label <- q[3]
+        }
+      }
+      flush_f()
+    }
+    recs[[length(recs) + 1]] <- list(id = id, description = desc, seq = seq, features = features)
+  }
+  recs
+}
+
+#' Parse FASTA or GenBank, detecting the format from the filename extension or,
+#' failing that, the content (a leading LOCUS line => GenBank).
+ga_parse_records <- function(text, filename = NULL) {
+  is_gb <- (!is.null(filename) && grepl("\\.(gb|gbk|genbank)$", filename, ignore.case = TRUE)) ||
+           grepl("^\\s*LOCUS", text)
+  if (is_gb) ga_parse_genbank(text) else ga_parse_fasta(text)
+}
+
+#' Pull named gene/CDS features out of an annotated record as standalone
+#' reference records (revcomp'd if on the minus strand), so each gene can be
+#' matched on its own -- this is what turns an insert-only read into GENE_FOUND
+#' against e.g. the AGGF1 feature rather than FLAGGED against the whole plasmid.
+ga_extract_gene_records <- function(record) {
+  feats <- record$features
+  if (is.null(feats) || length(feats) == 0) return(list())
+  out <- list()
+  for (f in feats) {
+    if (is.na(f$start) || is.na(f$end) || is.na(f$label) || !nzchar(f$label)) next
+    sub <- substr(record$seq, f$start, f$end)
+    if (!nzchar(sub)) next
+    if (identical(f$strand, -1L)) sub <- .ga_revcomp(sub)
+    out[[length(out) + 1]] <- list(id = f$label,
+      description = sprintf("%s (%s) from %s", f$label, f$type, record$id), seq = sub,
+      features = list(list(type = "gene", start = 1L, end = nchar(sub), strand = 1L, label = f$label)))
+  }
+  out
+}
+
+#' `records` plus any named gene/CDS features extracted from the annotated ones,
+#' deduplicated by (label, sequence).
+ga_expand_with_gene_features <- function(records) {
+  expanded <- records; seen <- character(0)
+  for (rec in records) for (g in ga_extract_gene_records(rec)) {
+    key <- paste(g$id, g$seq)
+    if (key %in% seen) next
+    seen <- c(seen, key); expanded[[length(expanded) + 1]] <- g
+  }
+  expanded
 }
 
 .ga_sanitize <- function(seq) toupper(gsub("[^A-Za-z]", "", seq))
