@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: build.sh substitutes __VERSION__ and __BUILD__. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>                 <string>Lit2Bench</string>
+  <key>CFBundleDisplayName</key>          <string>Lit2Bench</string>
+  <key>CFBundleIdentifier</key>           <string>com.codyciabarra.lit2bench</string>
+  <key>CFBundleExecutable</key>           <string>Lit2Bench</string>
+  <key>CFBundleIconFile</key>             <string>AppIcon</string>
+  <key>CFBundlePackageType</key>          <string>APPL</string>
+  <key>CFBundleShortVersionString</key>   <string>__VERSION__</string>
+  <key>CFBundleVersion</key>              <string>__BUILD__</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>NSPrincipalClass</key>             <string>NSApplication</string>
+  <!-- 12.0 for WKDownload and underPageBackgroundColor, both used by the native
+       shell in native/Lit2Bench.swift. -->
+  <key>LSMinimumSystemVersion</key>       <string>12.0</string>
+  <key>LSApplicationCategoryType</key>    <string>public.app-category.education</string>
+  <key>NSHighResolutionCapable</key>      <true/>
+  <key>LSUIElement</key>                  <false/>
+  <!-- The UI is served by an R process on 127.0.0.1 over plain HTTP, and Shiny
+       talks to it over a WebSocket. App Transport Security blocks both by
+       default; NSAllowsLocalNetworking permits loopback only, without opening up
+       arbitrary insecure HTTP. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>    <true/>
+  </dict>
+  <key>NSHumanReadableCopyright</key>     <string>MIT licensed. © Cody Ciabarra.</string>
+</dict>
+</plist>

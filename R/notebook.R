@@ -14,13 +14,18 @@
 # saved grid reloads with exactly the same shape, and scalar fields are unboxed
 # on write and re-flattened on read.
 
-NB_ROOT <- "lab_notebook"
 NB_MAX_TABLES <- 6L    # UI pre-declares this many table slots (see app.R)
 NB_SECTIONS <- c("objective", "reagents", "setup", "results", "conclusions")
 
+# Resolved per call rather than baked in at source time: an installed .app
+# bundle is read-only, so the launcher points LIT2BENCH_DATA_DIR at
+# ~/Library/Application Support/Lit2Bench (see R/paths.R). From a checkout this
+# is still ./lab_notebook.
+nb_root <- function() file.path(l2b_data_dir(), "lab_notebook")
+
 nb_paths <- function() list(
-  procedures  = file.path(NB_ROOT, "procedures"),
-  experiments = file.path(NB_ROOT, "experiments"))
+  procedures  = file.path(nb_root(), "procedures"),
+  experiments = file.path(nb_root(), "experiments"))
 
 .nb_dir_for <- function(kind) {
   kind <- if (length(kind) == 0) NA_character_ else kind[1]

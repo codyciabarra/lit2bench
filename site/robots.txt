@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://lit2bench.com/sitemap.xml

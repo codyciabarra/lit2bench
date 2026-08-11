@@ -624,6 +624,24 @@ L2B_JS <- "
   applyTheme(saved);
   document.addEventListener('shiny:connected', function(){ applyTheme(saved); });
 
+  // The chrome is pure CSS and repaints instantly above, but two panels render
+  // their figures server-side from input$theme_mode (sashimi plot, primer
+  // schematic / plasmid map), and dark_mode() treats a missing value as dark.
+  // The first applyTheme() runs before Shiny exists, so its setInputValue is a
+  // no-op, and the shiny:connected listener above can be registered after that
+  // event has already fired -- leaving theme_mode never set at all. A light-mode
+  // visitor then gets a dark-palette figure inside a light UI. Re-push once the
+  // input channel is genuinely up, then stop.
+  var themeTries = 0;
+  var themeTimer = setInterval(function(){
+    if (window.Shiny && Shiny.setInputValue && Shiny.shinyapp && Shiny.shinyapp.$inputValues) {
+      applyTheme(saved);
+      clearInterval(themeTimer);
+    } else if (++themeTries > 150) {
+      clearInterval(themeTimer);
+    }
+  }, 100);
+
   document.addEventListener('click', function(e){
     var btn = e.target.closest('.l2b-theme-toggle button');
     if (btn) applyTheme(btn.getAttribute('data-l2b-theme'));

@@ -8,3 +8,8 @@
 
 # lab notebook (user data -- procedures & experiments saved by the app)
 lab_notebook/
+dist/
+
+# demo masters and intermediate cuts (30 MB of alternate encodes).
+# The finished clips that the site actually serves live in site/assets/.
+demo/

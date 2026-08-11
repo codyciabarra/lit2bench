@@ -1,0 +1,41 @@
+# Publish site/ to GitHub Pages.
+#
+# Inert until the repository is public (or on a plan with Pages for private
+# repos) and Pages is switched to "GitHub Actions" as its source in
+# Settings -> Pages. Until then this workflow simply never gets a chance to run.
+#
+# The site is three static files plus assets -- there is nothing to build, so
+# this uploads site/ verbatim.
+
+name: Deploy site
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

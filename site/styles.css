@@ -1,0 +1,492 @@
+/* styles.css -- Lit2Bench product site.
+ *
+ * Shares its palette with the app itself (R/ui_helpers.R's L2B_CSS): the same
+ * --l2b-* custom properties, the same accent ramp, the same data-theme
+ * attribute on <html>. A visitor who downloads the app should recognise it as
+ * the same product, so the two stylesheets are deliberately kept in sync by
+ * hand rather than diverging into separate "marketing" and "product" looks.
+ *
+ * No build step, no framework, no external requests -- this has to deploy as
+ * three files on GitHub Pages.
+ */
+
+/* ============================================================ design tokens */
+:root {
+  --bg:#080a13; --bg-2:#0d1120;
+  --surface:#12172a; --surface-2:#1a2036;
+  --glass:rgba(23,28,48,.58); --glass-2:rgba(30,36,58,.42);
+  --glass-border:rgba(174,182,230,.14); --glass-hi:rgba(255,255,255,.09);
+  --border:#232a42; --border-strong:#323b5c;
+  --text:#e9ecf5; --muted:#97a1bd; --faint:#626c8a;
+  --accent:#8f7dfa; --accent-2:#4f8cff; --accent-3:#2fd9c4;
+  --accent-soft:rgba(143,125,250,.18); --accent-text:#c2b6ff;
+  --secondary:#f2a341; --success:#2fbf71; --danger:#f2555b;
+  --shadow:0 10px 34px rgba(0,0,0,.46);
+  --shadow-lg:0 30px 90px rgba(0,0,0,.5);
+  --glow-1:rgba(143,125,250,.26); --glow-2:rgba(79,140,255,.20); --glow-3:rgba(47,217,196,.14);
+  --code-bg:rgba(8,11,22,.66);
+  --nav-bg:rgba(12,16,30,.62);
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg:#eef0f8; --bg-2:#ffffff;
+  --surface:#ffffff; --surface-2:#f3f5fb;
+  --glass:rgba(255,255,255,.66); --glass-2:rgba(255,255,255,.48);
+  --glass-border:rgba(70,80,140,.12); --glass-hi:rgba(255,255,255,.85);
+  --border:#e1e6f0; --border-strong:#c9d1e3;
+  --text:#131a2c; --muted:#5c6580; --faint:#8b93ab;
+  --accent:#6355e0; --accent-2:#2f6df0; --accent-3:#0fac96;
+  --accent-soft:rgba(99,85,224,.11); --accent-text:#5442d6;
+  --secondary:#c9791a; --success:#15915c; --danger:#c0392b;
+  --shadow:0 4px 20px rgba(30,40,80,.09);
+  --shadow-lg:0 24px 70px rgba(30,40,80,.16);
+  --glow-1:rgba(99,85,224,.18); --glow-2:rgba(47,109,240,.13); --glow-3:rgba(15,172,150,.12);
+  --code-bg:rgba(240,243,250,.9);
+  --nav-bg:rgba(255,255,255,.66);
+  color-scheme: light;
+}
+* { --grad:linear-gradient(135deg, var(--accent), var(--accent-2) 62%, var(--accent-3)); }
+
+/* ================================================================== reset */
+*, *::before, *::after { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:88px; -webkit-text-size-adjust:100%; }
+body {
+  margin:0; background:var(--bg); color:var(--text);
+  font:16px/1.6 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing:antialiased; overflow-x:hidden;
+  transition:background-color .25s, color .25s;
+}
+img, svg { max-width:100%; display:block; }
+a { color:var(--accent-text); text-decoration:none; }
+a:hover { text-decoration:underline; }
+h1,h2,h3 { margin:0; letter-spacing:-.035em; line-height:1.08; font-weight:750; }
+p { margin:0; }
+ul { margin:0; padding:0; list-style:none; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:8px; }
+
+/* ============================================================== background */
+/* Three slow-drifting blurred blobs, fixed behind everything. Cheap enough to
+   run for the whole page because they never trigger layout -- transform only. */
+.bg { position:fixed; inset:0; z-index:-2; overflow:hidden; pointer-events:none; }
+.bg i {
+  position:absolute; display:block; border-radius:50%;
+  filter:blur(90px); animation:drift 26s ease-in-out infinite;
+}
+.bg i:nth-child(1){ width:62vw; height:62vw; left:-14vw; top:-18vw;  background:var(--glow-1); }
+.bg i:nth-child(2){ width:54vw; height:54vw; right:-12vw; top:12vh;  background:var(--glow-2); animation-delay:-9s; }
+.bg i:nth-child(3){ width:58vw; height:58vw; left:18vw;  top:62vh;   background:var(--glow-3); animation-delay:-18s; }
+@keyframes drift {
+  0%,100% { transform:translate3d(0,0,0) scale(1); }
+  33%     { transform:translate3d(4vw,-3vh,0) scale(1.1); }
+  66%     { transform:translate3d(-3vw,4vh,0) scale(.93); }
+}
+/* A faint dot grid keeps the large flat areas from looking like empty gradient. */
+.grid-overlay {
+  position:fixed; inset:0; z-index:-1; pointer-events:none; opacity:.42;
+  background-image:radial-gradient(circle at 1px 1px, var(--glass-border) 1px, transparent 0);
+  background-size:34px 34px;
+  -webkit-mask-image:radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 78%);
+          mask-image:radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 78%);
+}
+
+/* ================================================================== layout */
+.wrap { width:min(1180px, calc(100% - 48px)); margin-inline:auto; }
+section { padding:clamp(64px, 9vw, 120px) 0; position:relative; }
+.sec-head { max-width:660px; margin-bottom:44px; }
+.eyebrow {
+  display:inline-flex; align-items:center; gap:8px; margin-bottom:16px;
+  font-size:12px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--accent-text); background:var(--accent-soft);
+  border:1px solid var(--glass-border); border-radius:99px; padding:6px 13px;
+}
+.eyebrow::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--grad); }
+h2 { font-size:clamp(28px, 4vw, 42px); }
+.sec-head p { margin-top:16px; color:var(--muted); font-size:17px; }
+
+/* ================================================================== glass */
+/* Grid and flex children default to min-width:auto, meaning they refuse to
+   shrink below their widest unbreakable content. One long `<code>` path is
+   then enough to force a whole column wider than the phone it's rendering on,
+   which pushes the entire page into horizontal scroll. Opt every card track
+   out of that. */
+.stats > *, .dl-grid > *, .tool-grid > *, .flow > *,
+.principles > *, .roadmap > *, .people > * { min-width:0; }
+
+/* Inline code has to be able to break mid-token for the same reason. The
+   block-level snippets in .code opt back into `pre` and scroll instead. */
+code { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.9em;
+  overflow-wrap:anywhere; }
+
+.glass {
+  background:var(--glass); border:1px solid var(--glass-border); border-radius:20px;
+  -webkit-backdrop-filter:blur(22px) saturate(170%); backdrop-filter:blur(22px) saturate(170%);
+  box-shadow:var(--shadow), inset 0 1px 0 var(--glass-hi);
+}
+
+/* ==================================================================== nav */
+.nav {
+  position:sticky; top:0; z-index:50; padding:10px 0;
+  background:var(--nav-bg); border-bottom:1px solid transparent;
+  -webkit-backdrop-filter:blur(20px) saturate(180%); backdrop-filter:blur(20px) saturate(180%);
+  transition:border-color .25s, background-color .25s;
+}
+.nav.scrolled { border-bottom-color:var(--glass-border); }
+.nav .wrap { display:flex; align-items:center; gap:22px; }
+.brand { display:flex; align-items:center; gap:11px; color:inherit; }
+.brand:hover { text-decoration:none; }
+.brand-mark {
+  width:36px; height:36px; border-radius:11px; flex:0 0 auto; background:var(--grad);
+  display:flex; align-items:center; justify-content:center;
+  box-shadow:0 4px 16px rgba(124,108,240,.4), inset 0 1px 0 rgba(255,255,255,.35);
+}
+.brand-mark svg { width:21px; height:21px; }
+.brand-name { display:block; font-size:17px; font-weight:800; letter-spacing:-.02em; }
+.brand-sub { display:block; font-size:11px; color:var(--faint); margin-top:-1px; }
+.nav-links { display:flex; gap:4px; margin-left:auto; }
+.nav-links a {
+  color:var(--muted); font-size:14.5px; font-weight:550; padding:8px 13px; border-radius:9px;
+  transition:color .18s, background-color .18s;
+}
+.nav-links a:hover { color:var(--text); background:var(--glass-2); text-decoration:none; }
+.nav-actions { display:flex; align-items:center; gap:9px; }
+
+.icon-btn {
+  width:36px; height:36px; border-radius:10px; display:grid; place-items:center;
+  background:var(--glass-2); border:1px solid var(--glass-border); color:var(--muted);
+  cursor:pointer; transition:color .18s, border-color .18s, transform .18s;
+}
+.icon-btn:hover { color:var(--text); border-color:var(--border-strong); transform:translateY(-1px); }
+.icon-btn svg { width:17px; height:17px; }
+.theme-toggle .moon { display:none; }
+:root[data-theme="light"] .theme-toggle .moon { display:block; }
+:root[data-theme="light"] .theme-toggle .sun  { display:none; }
+
+/* ================================================================ buttons */
+.btn {
+  display:inline-flex; align-items:center; justify-content:center; gap:9px;
+  padding:13px 22px; border-radius:13px; font-size:15px; font-weight:650;
+  border:1px solid transparent; cursor:pointer; white-space:nowrap;
+  transition:transform .18s cubic-bezier(.22,1,.36,1), box-shadow .18s, background-color .18s, border-color .18s;
+}
+.btn:hover { text-decoration:none; transform:translateY(-2px); }
+.btn svg { width:18px; height:18px; flex:0 0 auto; }
+.btn-primary {
+  background:var(--grad); color:#fff;
+  box-shadow:0 6px 22px rgba(124,108,240,.42), inset 0 1px 0 rgba(255,255,255,.3);
+}
+.btn-primary:hover { box-shadow:0 12px 34px rgba(124,108,240,.5), inset 0 1px 0 rgba(255,255,255,.3); }
+.btn-ghost {
+  background:var(--glass-2); color:var(--text); border-color:var(--glass-border);
+  -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+}
+.btn-ghost:hover { border-color:var(--border-strong); }
+.btn-lg { padding:16px 28px; font-size:16px; border-radius:15px; }
+
+/* =================================================================== hero */
+.hero { padding-top:clamp(48px, 7vw, 86px); padding-bottom:0; text-align:center; }
+.hero h1 {
+  font-size:clamp(34px, 8vw, 82px); font-weight:800; margin:0 auto 22px;
+  max-width:16ch;
+}
+.hero h1 .grad {
+  background:var(--grad); -webkit-background-clip:text; background-clip:text;
+  -webkit-text-fill-color:transparent; color:transparent;
+}
+.hero-lead {
+  max-width:640px; margin:0 auto; color:var(--muted); font-size:clamp(17px, 2vw, 19.5px);
+}
+.hero-cta { display:flex; gap:13px; justify-content:center; flex-wrap:wrap; margin-top:34px; }
+.hero-note { margin-top:15px; font-size:13.5px; color:var(--faint); }
+
+/* ------------------------------------------------------------- decorative b-roll
+ * Generated atmosphere (glass, light, fluid) -- never product footage, and
+ * never anything that could read as data. It plays under the headline, so it
+ * is masked to nothing at every edge and held well below full opacity: the
+ * moment it competes with the type it has stopped doing its job.
+ *
+ * The clips are graded for the dark palette (near-black #080a13), so light
+ * theme drops them entirely rather than showing a black rectangle.
+ */
+.hero { position:relative; isolation:isolate; }
+.hero > .wrap { position:relative; z-index:1; }
+.hero-media {
+  position:absolute; inset:0 0 auto; z-index:0; height:min(76vh, 720px);
+  overflow:hidden; pointer-events:none;
+  -webkit-mask-image:radial-gradient(ellipse 68% 62% at 50% 36%, #000 0%, transparent 76%);
+          mask-image:radial-gradient(ellipse 68% 62% at 50% 36%, #000 0%, transparent 76%);
+}
+.hero-video { width:100%; height:100%; object-fit:cover; opacity:.48; }
+:root[data-theme="light"] .hero-media { display:none; }
+
+/* Per-card b-roll (workflow steps, credits banner). No `autoplay` in the
+   markup -- site.js plays these on intersection -- so under reduced motion,
+   where site.js never starts them, the poster is simply what stays on screen
+   and no extra CSS override is needed. */
+.broll {
+  aspect-ratio:16/9; margin-bottom:16px; border-radius:12px; overflow:hidden;
+  border:1px solid var(--glass-border); background:var(--bg-2);
+}
+.broll video { display:block; width:100%; height:100%; object-fit:cover; }
+.broll-wide { aspect-ratio:21/9; border-radius:18px; margin:0 0 26px; }
+:root[data-theme="light"] .broll { opacity:.9; }
+
+/* ---------------------------------------------------------------- demo section
+ * The product demo reuses the hero's macOS window chrome so it reads as the
+ * same application, not as an embedded player from somewhere else. Unlike the
+ * hero shot it is never tilted -- perspective on a clip you are meant to read
+ * makes the UI text in it harder, not easier, to follow.
+ */
+/* The demo breaks out of .wrap's 1180px. The app's result tables need ~1760px
+   of viewport before they stop clipping columns, so the clip is captured that
+   wide; playing it back at 1180 would shrink it to 67% and the labels become
+   unreadable. At ~1560 it plays near 90%, which stays legible without cutting
+   anything off. The sec-head and demo-note inside keep their own narrower
+   max-widths, so only the video actually gets wider. */
+#demo .wrap { width:min(1560px, calc(100% - 48px)); }
+.demo-frame { margin:0 auto; max-width:100%; }
+.demo-frame .demo-video { display:block; width:100%; height:auto; background:var(--bg); }
+.demo-note {
+  max-width:760px; margin:22px auto 0; text-align:center;
+  font-size:14.5px; color:var(--muted);
+}
+.demo-note code {
+  font-family:var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size:.92em; padding:1px 5px; border-radius:5px;
+  background:var(--code-bg); color:var(--accent-text);
+}
+
+/* macOS-ish window frame around the real product screenshot */
+.shot-frame {
+  margin-top:clamp(44px, 6vw, 76px); border-radius:16px; overflow:hidden;
+  border:1px solid var(--glass-border); box-shadow:var(--shadow-lg);
+  background:var(--surface); transform-style:preserve-3d;
+}
+.shot-bar {
+  display:flex; align-items:center; gap:7px; padding:11px 15px;
+  background:var(--glass); border-bottom:1px solid var(--glass-border);
+}
+.shot-bar i { width:11px; height:11px; border-radius:50%; background:var(--border-strong); }
+.shot-bar i:nth-child(1){ background:#ff5f57; } .shot-bar i:nth-child(2){ background:#febc2e; }
+.shot-bar i:nth-child(3){ background:#28c840; }
+/* Centred title, the way a real macOS window titlebar reads -- the app is a
+   Cocoa window, so this frame shouldn't imply a browser. The negative margin
+   offsets the traffic lights so the title centres on the frame, not the space
+   left over beside them. */
+.shot-bar span {
+  flex:1; text-align:center; margin-left:-56px; font-size:13px; font-weight:600;
+  color:var(--muted); letter-spacing:-.01em;
+}
+.shot-frame img { width:100%; }
+/* Very light parallax tilt driven by JS (--tilt-x/--tilt-y). */
+.shot-tilt { perspective:1600px; }
+.shot-tilt .shot-frame {
+  transform:rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+  transition:transform .4s cubic-bezier(.22,1,.36,1);
+}
+
+/* ================================================================== stats */
+.stats { display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; margin-top:clamp(48px,6vw,72px); }
+.stat { padding:24px 22px; border-radius:18px; text-align:left; }
+.stat b {
+  display:block; font-size:clamp(28px, 3.6vw, 40px); font-weight:800; letter-spacing:-.04em;
+  background:var(--grad); -webkit-background-clip:text; background-clip:text;
+  -webkit-text-fill-color:transparent; color:transparent;
+}
+.stat span { display:block; margin-top:5px; font-size:13.5px; color:var(--muted); }
+
+/* =============================================================== download */
+.dl-grid { display:grid; grid-template-columns:1.15fr .85fr; gap:20px; align-items:start; }
+.dl-card { padding:34px; border-radius:22px; }
+.dl-os { display:flex; align-items:center; gap:13px; margin-bottom:22px; }
+.dl-os svg { width:36px; height:36px; color:var(--text); }
+/* The label is <span><b>title</b><span>subtitle</span></span>, so the subtitle
+   rule has to be scoped to the inner span or the title inherits its colour. */
+.dl-os b { display:block; font-size:19px; font-weight:700; color:var(--text); }
+.dl-os span span { display:block; font-size:13.5px; color:var(--faint); }
+.dl-meta { display:flex; gap:20px; flex-wrap:wrap; margin-top:18px; font-size:13px; color:var(--faint); }
+.dl-meta b { color:var(--muted); font-weight:600; }
+
+.steps { counter-reset:s; display:grid; gap:16px; margin-top:28px; }
+.steps li { counter-increment:s; display:flex; gap:14px; align-items:flex-start; }
+.steps li::before {
+  content:counter(s); flex:0 0 auto; width:27px; height:27px; border-radius:9px;
+  display:grid; place-items:center; font-size:13px; font-weight:750; color:#fff;
+  background:var(--grad); box-shadow:inset 0 1px 0 rgba(255,255,255,.3);
+}
+.steps b { display:block; font-size:15px; font-weight:650; }
+.steps p { font-size:14px; color:var(--muted); margin-top:2px; }
+
+details.note {
+  margin-top:24px; border:1px solid var(--glass-border); border-radius:14px;
+  background:var(--glass-2); overflow:hidden;
+}
+details.note > summary {
+  cursor:pointer; padding:14px 18px; font-size:14px; font-weight:600; list-style:none;
+  display:flex; align-items:center; gap:10px;
+}
+details.note > summary::-webkit-details-marker { display:none; }
+details.note > summary::after {
+  content:"›"; margin-left:auto; font-size:19px; color:var(--faint);
+  transition:transform .2s; transform:rotate(90deg);
+}
+details.note[open] > summary::after { transform:rotate(-90deg); }
+details.note .note-body { padding:0 18px 18px; font-size:14px; color:var(--muted); }
+details.note .note-body p + p { margin-top:10px; }
+
+/* Multi-line snippets need the copy button pinned rather than flowed, or it
+   lands on top of the second line of the command. */
+.code {
+  position:relative; margin-top:14px; padding:12px 76px 12px 14px;
+  border-radius:11px; background:var(--code-bg); border:1px solid var(--glass-border);
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; color:var(--muted);
+}
+/* Scroll the code, not the box: the copy button is anchored to .code and would
+   slide out of view if .code were the scroll container. */
+.code code { display:block; white-space:pre; overflow-x:auto; overflow-wrap:normal; font-size:1em; }
+.copy {
+  position:absolute; top:9px; right:9px; padding:5px 10px; border-radius:7px; cursor:pointer;
+  font:600 11.5px/1 -apple-system, system-ui, sans-serif; color:var(--muted);
+  background:var(--surface-2); border:1px solid var(--glass-border); transition:color .15s;
+}
+.copy:hover { color:var(--text); }
+.copy.ok { color:var(--success); border-color:var(--success); }
+
+/* ================================================================== tools */
+.filters { display:flex; gap:9px; flex-wrap:wrap; align-items:center; margin-bottom:26px; }
+.chip {
+  padding:8px 15px; border-radius:99px; font-size:13.5px; font-weight:600; cursor:pointer;
+  color:var(--muted); background:var(--glass-2); border:1px solid var(--glass-border);
+  transition:color .18s, border-color .18s, background-color .18s;
+}
+.chip:hover { color:var(--text); }
+.chip[aria-pressed="true"] { color:#fff; background:var(--grad); border-color:transparent; }
+.tool-search {
+  margin-left:auto; min-width:200px; padding:9px 14px; border-radius:11px; font-size:14px;
+  color:var(--text); background:var(--glass-2); border:1px solid var(--glass-border); outline:none;
+  font-family:inherit;
+}
+.tool-search::placeholder { color:var(--faint); }
+.tool-search:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+
+.tool-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(268px, 1fr)); gap:14px; }
+.tool {
+  position:relative; padding:22px; border-radius:17px; overflow:hidden;
+  transition:transform .22s cubic-bezier(.22,1,.36,1), border-color .22s;
+}
+.tool:hover { transform:translateY(-3px); border-color:var(--border-strong); }
+/* Pointer spotlight, same idea as the app's cards: a radial highlight that
+   follows the cursor, positioned from --mx/--my set in JS. */
+.tool::before {
+  content:""; position:absolute; inset:0; opacity:0; transition:opacity .25s; pointer-events:none;
+  background:radial-gradient(320px circle at var(--mx,50%) var(--my,50%), var(--accent-soft), transparent 62%);
+}
+.tool:hover::before { opacity:1; }
+.tool > * { position:relative; }
+.tool-ico {
+  width:40px; height:40px; border-radius:12px; display:grid; place-items:center; font-size:19px;
+  background:var(--glass-2); border:1px solid var(--glass-border); margin-bottom:14px;
+}
+.tool h3 { font-size:16px; font-weight:700; letter-spacing:-.01em; }
+.tool p { margin-top:7px; font-size:13.5px; color:var(--muted); line-height:1.55; }
+.tool .grp {
+  display:inline-block; margin-top:14px; font-size:11px; font-weight:700;
+  letter-spacing:.08em; text-transform:uppercase; color:var(--faint);
+}
+.tool.hidden { display:none; }
+.no-results { color:var(--muted); font-size:15px; padding:28px 0; }
+
+/* =============================================================== workflow */
+.flow { display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; }
+.flow-step { padding:26px 22px; border-radius:18px; position:relative; }
+.flow-num {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; font-weight:700;
+  color:var(--accent-text); letter-spacing:.1em;
+}
+.flow-step h3 { margin-top:10px; font-size:17px; font-weight:700; }
+.flow-step p { margin-top:9px; font-size:14px; color:var(--muted); }
+.flow-step .tools-used { margin-top:16px; display:flex; flex-wrap:wrap; gap:6px; }
+.flow-step .tools-used span {
+  font-size:11.5px; font-weight:600; color:var(--muted); padding:4px 9px; border-radius:7px;
+  background:var(--glass-2); border:1px solid var(--glass-border);
+}
+
+/* ============================================================== principles */
+.principles { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px; }
+.principle { padding:28px 24px; border-radius:18px; }
+.principle .p-ico {
+  width:42px; height:42px; border-radius:13px; display:grid; place-items:center;
+  background:var(--grad); color:#fff; margin-bottom:16px;
+  box-shadow:0 5px 18px rgba(124,108,240,.34), inset 0 1px 0 rgba(255,255,255,.3);
+}
+.principle .p-ico svg { width:21px; height:21px; }
+.principle h3 { font-size:17px; font-weight:700; }
+.principle p { margin-top:9px; font-size:14.5px; color:var(--muted); }
+
+/* ================================================================ roadmap */
+.roadmap { display:grid; gap:12px; }
+.road {
+  display:grid; grid-template-columns:132px 1fr; gap:22px; align-items:start;
+  padding:22px 24px; border-radius:16px;
+}
+.road-tag {
+  font-size:11.5px; font-weight:750; letter-spacing:.08em; text-transform:uppercase;
+  padding:5px 11px; border-radius:99px; justify-self:start; white-space:nowrap;
+}
+.road-tag.now  { color:var(--success);   background:color-mix(in srgb, var(--success) 16%, transparent); }
+.road-tag.next { color:var(--accent-text); background:var(--accent-soft); }
+.road-tag.later{ color:var(--faint);     background:var(--glass-2); }
+.road h3 { font-size:16px; font-weight:700; }
+.road p { margin-top:6px; font-size:14px; color:var(--muted); }
+
+/* ================================================================ credits */
+.people { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px; }
+.person { padding:26px 24px; border-radius:18px; display:flex; gap:16px; align-items:center; }
+.person img {
+  width:64px; height:64px; border-radius:50%; object-fit:cover; flex:0 0 auto;
+  border:1px solid var(--glass-border);
+}
+.person b { display:block; font-size:15.5px; font-weight:700; color:var(--text); }
+.person span span { display:block; font-size:13px; color:var(--muted); margin-top:3px; }
+
+/* ================================================================== footer */
+footer { padding:44px 0 56px; border-top:1px solid var(--glass-border); margin-top:40px; }
+footer .wrap { display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
+footer p { font-size:13.5px; color:var(--faint); }
+footer nav { margin-left:auto; display:flex; gap:18px; }
+footer nav a { font-size:13.5px; color:var(--muted); }
+
+/* =============================================================== reveal fx */
+/* Scoped to html.js, which only exists once the inline head script has run.
+   Hiding content in plain CSS would mean a crawler, a link-preview bot, or any
+   browser where IntersectionObserver doesn't deliver sees a blank page -- the
+   animation is decoration, so it must never be the thing that makes the site
+   readable. site.js also force-reveals everything after a couple of seconds as
+   a second line of defence. */
+html.js .reveal { opacity:0; transform:translateY(18px); }
+html.js .reveal.in { opacity:1; transform:none; transition:opacity .6s cubic-bezier(.22,1,.36,1), transform .6s cubic-bezier(.22,1,.36,1); }
+
+/* ============================================================== responsive */
+@media (max-width:960px) {
+  .dl-grid, .flow, .principles, .people { grid-template-columns:1fr; }
+  .stats { grid-template-columns:repeat(2, 1fr); }
+  .nav-links { display:none; }
+}
+@media (max-width:560px) {
+  .wrap { width:calc(100% - 32px); }
+  .stats { grid-template-columns:1fr 1fr; }
+  .road { grid-template-columns:1fr; gap:12px; }
+  .tool-search { margin-left:0; width:100%; }
+  .brand-sub { display:none; }
+}
+
+/* Everything decorative above is motion; honour the system setting. */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior:auto; }
+  *, *::before, *::after { animation:none !important; transition-duration:.01ms !important; }
+  .reveal { opacity:1; transform:none; }
+  /* The hero clip is the one element that autoplays from the markup itself, so
+     it is the one that needs taking out here rather than in site.js. Swap it
+     for its own poster so the composition is unchanged, just still. */
+  .hero-video { display:none; }
+  .hero-media { background:url("assets/hero-poster.jpg") center/cover no-repeat; }
+}

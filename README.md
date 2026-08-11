@@ -11,7 +11,23 @@ interpretation step.
 
 ---
 
-## Quick start
+## Install the app
+
+Download the `.dmg`, drag Lit2Bench to Applications, and open it. It's a real
+Mac app — its own window, its own Dock icon, a normal menu bar, ⌘Q to quit — not
+a browser tab. On first launch a progress view walks through finding R (or
+installing it from CRAN for you) and installing the R packages, then hands over
+to the toolkit. Every launch after that takes seconds.
+
+Requires macOS 12 or later (Apple silicon or Intel). The app is ad-hoc signed
+rather than notarised, so the first open needs **System Settings → Privacy &
+Security → Open Anyway**.
+
+> Windows and Linux builds are on the roadmap. The app itself already runs
+> anywhere R does — only the installer wrapper is macOS-specific. Run from
+> source in the meantime.
+
+## Run from source
 
 ```bash
 # 1. install ALL dependencies once (CRAN + Bioconductor; only what's missing)
@@ -69,10 +85,20 @@ separate install.
 > Network-dependent tools (UCSC REST, NCBI E-utilities, Ollama) hit the real
 > services — a session needs network access to exercise those fully.
 
+## Repo layout
+
+| Path | What it is |
+|------|------------|
+| `app.R`, `R/` | the Shiny app — one file per tool |
+| `installer/` | packages the repo into `Lit2Bench.app` + a `.dmg` — see [installer/README.md](installer/README.md) |
+| `site/` | the product website (static; deployed to GitHub Pages) |
+
 ## Notes
 
-- **Single-user, local app.** Your notebook entries live in `lab_notebook/`,
-  which is gitignored — they stay on your machine.
+- **Single-user, local app.** Your notebook entries live in `lab_notebook/`
+  (gitignored) when run from a checkout, or in
+  `~/Library/Application Support/Lit2Bench/` when run as the installed app.
+  Either way they stay on your machine.
 - No package structure, no build step, no automated test suite — it's a
   script-sourced Shiny app you run directly. Verification is manual (run it,
   exercise the tool, check the output).

@@ -14,6 +14,7 @@ library(DT)
 # file) -- raise Shiny's default 5 MB cap well above that.
 options(shiny.maxRequestSize = 10000 * 1024^2)
 
+source("R/paths.R")
 source("R/ui_helpers.R")
 source("R/primer_design.R")
 source("R/design_splicing_primers.R")
@@ -869,6 +870,9 @@ server <- function(input, output, session) {
     subj <- .l2b_git(c("log", "-1", "--pretty=%s"))
     if (length(sha) && nzchar(sha[1]) && is.null(attr(sha, "status")))
       sprintf("Current build: %s — %s", sha[1], if (length(subj)) subj[1] else "")
+    else if (nzchar(l2b_version()))
+      # installed .app: no .git to interrogate, but build.sh stamped a VERSION
+      sprintf("Lit2Bench %s (installed app) — update by downloading the latest release.", l2b_version())
     else "Not a git checkout — self-update unavailable (use git pull manually)."
   })
   output$about_update_msg <- renderText(about_update_msg())

@@ -35,6 +35,30 @@ Per-tool, only needed if you touch that tool:
 
 None of the network-dependent code paths (UCSC REST, NCBI E-utilities, Ollama) are mocked — they hit the real services, so a dev session needs network access to exercise most tools fully.
 
+### Packaging and the website
+Two things wrap the app, both deliberately outside the R code:
+
+- `installer/macos/` builds `Lit2Bench.app` + a `.dmg` (`installer/macos/build.sh`).
+  It is a **real Cocoa app**, not a browser tab: `native/Lit2Bench.swift` is a
+  universal Swift binary that opens an `NSWindow` hosting the Shiny UI in a
+  `WKWebView` and runs `launcher/bootstrap.sh` as a child process. The bundle
+  ships the R **source**, not a runtime — first launch bootstraps R, the packages
+  and primer3, reporting progress into a self-refreshing local HTML page
+  (`launcher/status.sh`) that the window loads and that redirects itself onto the
+  server. Read `installer/README.md` before touching any of it; several
+  non-obvious constraints are documented there (GUI PATH, the moving CRAN arm64
+  directory, animation continuity across page reloads, sh-and-sed-only, and the
+  table of WebKit delegate methods each of which a specific tool depends on —
+  file uploads and every export button break without them).
+- `site/` is the static product site (three files, no build step) deployed to
+  Pages. Its palette is a hand-kept copy of `L2B_CSS`'s `--l2b-*` tokens — change
+  one and change the other, or the app and its website drift apart.
+
+Because an installed bundle is read-only, **anything the app writes must resolve
+through `l2b_data_dir()` in `R/paths.R`** (the launcher points it at
+`~/Library/Application Support/Lit2Bench`). Hardcoding a relative path works from
+a checkout and silently fails in the installed app.
+
 ## Architecture
 
 ### App shape: a tool registry, not a set of routes

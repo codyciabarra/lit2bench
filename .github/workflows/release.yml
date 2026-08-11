@@ -1,0 +1,99 @@
+# Build the macOS app and publish it as a release asset.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The site's download button points at
+# .../releases/latest/download/Lit2Bench-<version>.dmg, so the asset name has to
+# stay in step with RELEASE.version in site/site.js -- bump both together.
+#
+# Runs on a macOS runner because the bundle needs codesign, hdiutil and iconutil.
+# It does *not* need Chrome: installer/macos/AppIcon.icns is committed, and
+# build.sh only regenerates it when asked with --refresh-icon.
+
+name: Release macOS app
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # build.sh reads the short SHA for CFBundleVersion
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            v="${{ github.event.inputs.version }}"
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      # Needs swiftc for the native Cocoa shell; the macOS runner ships Xcode.
+      - name: Build app + dmg
+        run: installer/macos/build.sh --version "${{ steps.v.outputs.version }}"
+
+      # Catches the mistake that would otherwise ship a broken download: a
+      # bundle whose launcher is missing, or a dmg that won't mount.
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          app=dist/Lit2Bench.app
+          test -x "$app/Contents/MacOS/Lit2Bench"
+          # Must be the universal Cocoa binary, not a stray shell script
+          file "$app/Contents/MacOS/Lit2Bench" | grep -q 'Mach-O universal'
+          lipo -archs "$app/Contents/MacOS/Lit2Bench" | grep -q arm64
+          lipo -archs "$app/Contents/MacOS/Lit2Bench" | grep -q x86_64
+          test -x "$app/Contents/Resources/launcher/bootstrap.sh"
+          test -f "$app/Contents/Resources/app/app.R"
+          test -f "$app/Contents/Resources/app/VERSION"
+          codesign --verify --deep --strict "$app"
+          hdiutil attach -nobrowse -readonly -mountpoint /tmp/l2bdmg \
+            "dist/Lit2Bench-${{ steps.v.outputs.version }}.dmg"
+          test -d /tmp/l2bdmg/Lit2Bench.app
+          hdiutil detach /tmp/l2bdmg
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # --notes-file rather than --notes + --generate-notes: gh treats those
+          # two as alternatives, and getting it wrong fails the whole release.
+          cat > /tmp/notes.md <<'NOTES'
+          ## Install
+
+          1. Open the `.dmg` and drag **Lit2Bench** to Applications.
+          2. Launch it. A progress view finds R (or installs it from CRAN for
+             you) and installs the R packages, then hands over to the toolkit.
+             First run takes a few minutes; every launch after that is seconds.
+
+          A real Mac app: its own window, its own Dock icon, a normal menu bar.
+          Requires macOS 12 or later, Apple silicon or Intel.
+
+          ## First launch warning
+
+          The app is ad-hoc signed rather than notarised with a paid Apple
+          Developer ID, so Gatekeeper blocks the first open. Go to
+          **System Settings → Privacy & Security**, scroll down, and click
+          **Open Anyway**. You only do this once.
+          NOTES
+
+          gh release create "v${{ steps.v.outputs.version }}" \
+            "dist/Lit2Bench-${{ steps.v.outputs.version }}.dmg" \
+            --title "Lit2Bench ${{ steps.v.outputs.version }}" \
+            --notes-file /tmp/notes.md \
+            || gh release upload "v${{ steps.v.outputs.version }}" \
+                 "dist/Lit2Bench-${{ steps.v.outputs.version }}.dmg" --clobber

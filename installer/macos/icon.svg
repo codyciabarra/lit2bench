@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Lit2Bench app mark. One artwork, three uses: the .icns for the bundle
+       (rendered at 1024 by build.sh), the setup page, and the website header.
+       Drawn on the macOS Big Sur icon grid: an 824pt squircle inset 100pt on
+       every side, so it lines up with the system icons beside it in the Dock. -->
+  <defs>
+    <linearGradient id="l2bFace" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="#9d8cff"/>
+      <stop offset="55%"  stop-color="#5b8cff"/>
+      <stop offset="100%" stop-color="#2fd9c4"/>
+    </linearGradient>
+    <linearGradient id="l2bSheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity=".38"/>
+      <stop offset="42%"  stop-color="#ffffff" stop-opacity=".06"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="l2bDrop" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="26" stdDeviation="26" flood-color="#0b1024" flood-opacity=".34"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#l2bDrop)">
+    <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#l2bFace)"/>
+    <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#l2bSheen)"/>
+    <rect x="100" y="100" width="824" height="824" rx="185" ry="185"
+          fill="none" stroke="#ffffff" stroke-opacity=".22" stroke-width="3"/>
+  </g>
+
+  <!-- Double helix, drawn in a 24-unit box scaled to 520pt and centred.
+       Each strand is two cubics running x 8->16->8 over y 2->12->22, so the
+       pair crosses at y=7 and y=17. The rungs sit at y=4.7, 12 and 19.3, the
+       three points where the strands are furthest apart (x 9.25/14.75 at the
+       first and third, the full 8/16 at the middle). Putting them anywhere
+       else lands them on a crossing, where they read as blobs rather than
+       base pairs. -->
+  <g transform="translate(252 252) scale(21.6667)" fill="none" stroke="#ffffff"
+     stroke-width="1.5" stroke-linecap="round">
+    <path d="M8 2 C8 6 16 8 16 12 C16 16 8 18 8 22"/>
+    <path d="M16 2 C16 6 8 8 8 12 C8 16 16 18 16 22"/>
+    <g stroke-opacity=".9">
+      <path d="M9.25 4.7h5.5"/>
+      <path d="M8 12h8"/>
+      <path d="M9.25 19.3h5.5"/>
+    </g>
+  </g>
+</svg>
