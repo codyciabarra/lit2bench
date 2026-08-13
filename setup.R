@@ -8,7 +8,11 @@
 # Engine's BAM I/O, Plasmid QC's alignment, the local-model interpretation) and
 # is installed here too so every tool works out of the box.
 
-CRAN_CORE     <- c("shiny", "bslib", "DT")
+# jsonlite is declared even though shiny imports it transitively: the lab
+# notebook and the usage log call jsonlite:: directly, and relying on someone
+# else's dependency graph to supply them is how a future shiny release quietly
+# breaks saving an experiment.
+CRAN_CORE     <- c("shiny", "bslib", "DT", "jsonlite")
 CRAN_OPTIONAL <- c("httr")                                    # local-model (Ollama) interpretation
 BIOC_OPTIONAL <- c("Rsamtools", "GenomicAlignments", "pwalign")  # Cryptic Engine + Plasmid QC
 

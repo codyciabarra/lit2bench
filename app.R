@@ -15,6 +15,8 @@ library(DT)
 options(shiny.maxRequestSize = 10000 * 1024^2)
 
 source("R/paths.R")
+source("R/usage.R")
+source("R/update_check.R")
 source("R/ui_helpers.R")
 source("R/primer_design.R")
 source("R/design_splicing_primers.R")
@@ -595,14 +597,23 @@ panel_about <- function() {
       div(class = "l2b-about-foot",
         tags$a(href = "https://gitlerlab.org", target = "_blank", rel = "noopener", "gitlerlab.org"))),
 
-    l2b_card(NULL, "Updates", "Lit2Bench runs from a local git clone — pull the latest from GitHub without leaving the app.",
+    l2b_card(NULL, "Updates", "Checked once a day on launch. Lit2Bench never updates itself — an analysis tool that changes its own code mid-experiment is a reproducibility problem.",
       div(style = "font-size:13px; color:var(--l2b-text-muted); margin-bottom:12px;",
           textOutput("about_version", inline = TRUE)),
+      uiOutput("about_update_banner"),
       div(style = "display:flex; gap:10px; flex-wrap:wrap;",
         actionButton("about_check", "Check for updates", class = "btn-ghost"),
         actionButton("about_update", "\U2b07 Update now", class = "btn-alt", style = "width:auto;")),
       div(style = "margin-top:12px; font-size:13.5px; color:var(--l2b-text);",
           textOutput("about_update_msg", inline = TRUE))),
+
+    l2b_card(NULL, "Your usage", "A private log of what you've run, kept on this machine only. Nothing is uploaded anywhere — there is no server to upload it to.",
+      uiOutput("about_usage"),
+      div(style = "display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;",
+        actionButton("about_usage_refresh", "Refresh", class = "btn-ghost"),
+        actionButton("about_usage_clear", "Delete usage data", class = "btn-ghost")),
+      div(style = "margin-top:10px; font-size:12.5px; color:var(--l2b-text-muted);",
+          textOutput("about_usage_msg", inline = TRUE))),
 
     l2b_card(NULL, "Acknowledgements", NULL,
       p(class = "l2b-person-blurb", style = "margin:0;",
@@ -755,10 +766,29 @@ server <- function(input, output, session) {
   # (list(tx = <exon data.frame>, name = <transcript accession>, gene_symbol = ...))
   shared_selected_tx <- reactiveVal(NULL)
 
+  # ---- local usage log (never leaves this machine -- see R/usage.R) ----
+  # l2b_current_version(), not l2b_version(): the latter is empty in a checkout,
+  # which would log every dev session as version "".
+  l2b_log("session_start", version = l2b_current_version(),
+          r = paste0(R.version$major, ".", R.version$minor),
+          os = as.character(Sys.info()[["sysname"]]),
+          installed = nzchar(Sys.getenv("LIT2BENCH_DATA_DIR", unset = "")))
+
   # tell the client which tool is active so CSS can switch layout (full-width,
   # no right rail, for wide-figure tools like the Cryptic Splicing Engine)
+  #
+  # Doubles as the tool_open hook. The observer re-fires on any reactive
+  # invalidation, not just a real tab change, so the last-seen tool is tracked
+  # here and an unchanged value logs nothing -- otherwise "tools opened" would
+  # really be counting reactive flushes.
+  last_tool <- NULL
   observe({
-    session$sendCustomMessage("l2bTool", if (is.null(input$tool_tabs)) "home" else input$tool_tabs)
+    active <- if (is.null(input$tool_tabs)) "home" else input$tool_tabs
+    session$sendCustomMessage("l2bTool", active)
+    if (is.null(last_tool) || !identical(last_tool, active)) {
+      last_tool <<- active
+      l2b_log("tool_open", tool = active)
+    }
   })
 
   # ======================================================================
@@ -864,28 +894,87 @@ server <- function(input, output, session) {
     suppressWarnings(system2("git", args, stdout = TRUE, stderr = TRUE)),
     error = function(e) structure(character(0), status = 1L))
   about_update_msg <- reactiveVal("")
-  output$about_version <- renderText({
-    input$about_check  # re-read after a check
+
+  # Is this a git checkout? Decides whether "Update now" can pull, and whether
+  # the version line talks about commits or a release tag.
+  .l2b_is_checkout <- function() {
     sha <- .l2b_git(c("rev-parse", "--short", "HEAD"))
-    subj <- .l2b_git(c("log", "-1", "--pretty=%s"))
-    if (length(sha) && nzchar(sha[1]) && is.null(attr(sha, "status")))
-      sprintf("Current build: %s — %s", sha[1], if (length(subj)) subj[1] else "")
-    else if (nzchar(l2b_version()))
-      # installed .app: no .git to interrogate, but build.sh stamped a VERSION
-      sprintf("Lit2Bench %s (installed app) — update by downloading the latest release.", l2b_version())
-    else "Not a git checkout — self-update unavailable (use git pull manually)."
+    length(sha) && nzchar(sha[1]) && is.null(attr(sha, "status"))
+  }
+
+  # The launch-time check. Runs once per session against a 24h on-disk cache, so
+  # the usual launch is a file read and no network call at all. Wrapped in
+  # tryCatch on top of update_check.R's own guards because nothing about the
+  # About tab is worth failing a session over.
+  update_status <- reactiveVal(NULL)
+  observeEvent(TRUE, once = TRUE, {
+    update_status(tryCatch(l2b_update_check(), error = function(e) NULL))
   })
+
+  output$about_update_banner <- renderUI({
+    chk <- update_status()
+    if (is.null(chk) || !identical(chk$status, "available")) return(NULL)
+    # l2b_warn() takes message strings and passes them through HTML(), so the
+    # link is folded into the message rather than appended as a child element.
+    l2b_warn(sprintf(
+      'Lit2Bench %s is available — you\'re running %s. <a href="%s" target="_blank" rel="noopener">Open the release page &rarr;</a>',
+      htmltools::htmlEscape(chk$latest),
+      htmltools::htmlEscape(if (nzchar(chk$current)) chk$current else "an older build"),
+      htmltools::htmlEscape(chk$url, attribute = TRUE)))
+  })
+
+  output$about_version <- renderText({
+    input$about_check  # re-read after a manual check
+    chk <- update_status()
+    latest <- if (!is.null(chk) && !is.na(chk$latest)) sprintf(" · latest release %s", chk$latest) else ""
+    if (.l2b_is_checkout()) {
+      sha <- .l2b_git(c("rev-parse", "--short", "HEAD"))
+      subj <- .l2b_git(c("log", "-1", "--pretty=%s"))
+      sprintf("Current build: %s — %s%s", sha[1], if (length(subj)) subj[1] else "", latest)
+    } else if (nzchar(l2b_version())) {
+      sprintf("Lit2Bench %s (installed app)%s", l2b_version(), latest)
+    } else {
+      sprintf("Build unknown (not a git checkout, no VERSION stamp)%s", latest)
+    }
+  })
+
   output$about_update_msg <- renderText(about_update_msg())
+
   observeEvent(input$about_check, {
-    .l2b_git(c("fetch", "--quiet"))
-    behind <- .l2b_git(c("rev-list", "--count", "HEAD..@{u}"))
-    n <- suppressWarnings(as.integer(behind[1]))
-    about_update_msg(
-      if (length(behind) == 0 || is.na(n)) "Couldn't check (no tracking remote, or git unavailable)."
-      else if (n == 0) "Up to date with origin/main."
-      else sprintf("%d update%s available — click Update now.", n, if (n == 1) "" else "s"))
+    # force = TRUE: an explicit click should hit the network, not hand back a
+    # cached answer from this morning.
+    chk <- tryCatch(l2b_update_check(force = TRUE), error = function(e) NULL)
+    update_status(chk)
+    if (is.null(chk)) { about_update_msg("Couldn't check for updates."); return() }
+
+    if (.l2b_is_checkout()) {
+      # In a checkout the release tag is only half the story -- what matters is
+      # whether the tracking branch has commits this working copy doesn't.
+      .l2b_git(c("fetch", "--quiet"))
+      behind <- .l2b_git(c("rev-list", "--count", "HEAD..@{u}"))
+      n <- suppressWarnings(as.integer(behind[1]))
+      about_update_msg(
+        if (length(behind) == 0 || is.na(n))
+          sprintf("%s (no tracking remote, so commits can't be compared.)", l2b_update_message(chk))
+        else if (n == 0) sprintf("%s Up to date with origin/main.", l2b_update_message(chk))
+        else sprintf("%s %d new commit%s on origin/main — click Update now.",
+                     l2b_update_message(chk), n, if (n == 1) "" else "s"))
+    } else {
+      about_update_msg(l2b_update_message(chk))
+    }
   })
   observeEvent(input$about_update, {
+    # An installed bundle has no .git and is read-only besides -- Gatekeeper
+    # invalidates the signature of a bundle you mutate. Say where to get the new
+    # version instead of running a git pull that can only fail here.
+    if (!.l2b_is_checkout()) {
+      chk <- update_status()
+      about_update_msg(sprintf(
+        "This is the installed app, which can't update itself — download %s from %s and drag it over the old one.",
+        if (!is.null(chk) && !is.na(chk$latest)) chk$latest else "the latest release",
+        L2B_RELEASES_URL))
+      return()
+    }
     out <- .l2b_git(c("pull", "--ff-only"))
     txt <- paste(out, collapse = " ")
     if (!is.null(attr(out, "status")) && attr(out, "status") != 0)
@@ -893,6 +982,53 @@ server <- function(input, output, session) {
     else if (grepl("up to date", txt, ignore.case = TRUE))
       about_update_msg("Already up to date.")
     else about_update_msg("Updated from GitHub. Restart the app (stop and re-run) to apply the changes.")
+  })
+
+  # ---- ABOUT: the local usage log ----
+  usage_tick <- reactiveVal(0)   # bumped to force a re-read after refresh/clear
+  about_usage_msg <- reactiveVal("")
+  output$about_usage_msg <- renderText(about_usage_msg())
+
+  output$about_usage <- renderUI({
+    usage_tick()
+    s <- tryCatch(l2b_usage_summary(), error = function(e) NULL)
+    if (is.null(s)) return(l2b_empty("\U0001f4c1", "Usage log unavailable", "Couldn't read the log directory."))
+    if (!s$enabled)
+      return(l2b_empty("\U0001f6d1", "Usage logging is off",
+                       "LIT2BENCH_NO_USAGE_LOG is set. Unset it and restart to start recording."))
+    if (s$n == 0)
+      return(l2b_empty("\U0001f4ca", "Nothing logged yet",
+                       "Counts appear here as you open tools, run analyses and export files."))
+
+    top <- if (length(s$by_tool))
+      paste(sprintf("%s (%d)", names(s$by_tool), as.integer(s$by_tool))[seq_len(min(5, length(s$by_tool)))],
+            collapse = " · ") else "\U2014"
+
+    tagList(
+      l2b_hero(
+        l2b_stat("Sessions", s$sessions),
+        l2b_stat("Analyses", s$analyses),
+        l2b_stat("Exports", s$exports),
+        l2b_stat("BAM loads", s$uploads)),
+      div(style = "margin-top:12px; font-size:13px; color:var(--l2b-text);",
+          tags$div(tags$strong("Most-used tools: "), top),
+          tags$div(style = "margin-top:4px; color:var(--l2b-text-muted);",
+                   sprintf("%d events from %s to %s.", s$n, substr(s$first, 1, 10), substr(s$last, 1, 10))),
+          tags$div(style = "margin-top:4px; color:var(--l2b-text-muted); word-break:break-all;",
+                   sprintf("Stored in %s", s$dir))))
+  })
+
+  observeEvent(input$about_usage_refresh, {
+    usage_tick(usage_tick() + 1)
+    about_usage_msg("Reloaded from disk.")
+  })
+  observeEvent(input$about_usage_clear, {
+    n <- tryCatch(l2b_usage_clear(), error = function(e) -1L)
+    usage_tick(usage_tick() + 1)
+    about_usage_msg(
+      if (n < 0) "Couldn't delete the usage log."
+      else if (n == 0) "Nothing to delete."
+      else sprintf("Deleted %d usage log file%s.", n, if (n == 1) "" else "s"))
   })
 
   # ======================================================================
@@ -1012,29 +1148,29 @@ server <- function(input, output, session) {
       )
     )
   })
-  output$extractor_dl_bed <- downloadHandler(
+  output$extractor_dl_bed <- l2b_dl("extractor_dl_bed",
     filename = function() sprintf("%s_exons.bed", shared_selected_tx()$name),
     content = function(f) writeLines(export_bed(extractor_seqs()$exons, extractor_seqs()$chrom, extractor_seqs()$strand, shared_selected_tx()$name, "exon"), f))
-  output$extractor_dl_fasta <- downloadHandler(
+  output$extractor_dl_fasta <- l2b_dl("extractor_dl_fasta",
     filename = function() sprintf("%s_exons.fasta", shared_selected_tx()$name),
     content = function(f) writeLines(export_fasta(extractor_seqs()$exons, extractor_seqs()$chrom, shared_selected_tx()$name, "exon"), f))
-  output$extractor_dl_csv <- downloadHandler(
+  output$extractor_dl_csv <- l2b_dl("extractor_dl_csv",
     filename = function() sprintf("%s_exons.csv", shared_selected_tx()$name),
     content = function(f) writeLines(export_csv_text(extractor_seqs()$exons), f))
-  output$extractor_dl_json <- downloadHandler(
+  output$extractor_dl_json <- l2b_dl("extractor_dl_json",
     filename = function() sprintf("%s_exons.json", shared_selected_tx()$name),
     content = function(f) writeLines(export_json(extractor_seqs()$exons), f))
-  output$extractor_dl_gtf <- downloadHandler(
+  output$extractor_dl_gtf <- l2b_dl("extractor_dl_gtf",
     filename = function() sprintf("%s.gtf", shared_selected_tx()$name),
     content = function(f) {
       tx <- shared_selected_tx()$tx
       writeLines(export_gtf(extractor_seqs()$exons, extractor_seqs()$chrom, extractor_seqs()$strand,
                             shared_selected_tx()$name, shared_selected_tx()$gene_symbol, tx$cds_start[1], tx$cds_end[1]), f)
     })
-  output$extractor_dl_intron_bed <- downloadHandler(
+  output$extractor_dl_intron_bed <- l2b_dl("extractor_dl_intron_bed",
     filename = function() sprintf("%s_introns.bed", shared_selected_tx()$name),
     content = function(f) writeLines(export_bed(extractor_seqs()$introns, extractor_seqs()$chrom, extractor_seqs()$strand, shared_selected_tx()$name, "intron"), f))
-  output$extractor_dl_intron_fasta <- downloadHandler(
+  output$extractor_dl_intron_fasta <- l2b_dl("extractor_dl_intron_fasta",
     filename = function() sprintf("%s_introns.fasta", shared_selected_tx()$name),
     content = function(f) writeLines(export_fasta(extractor_seqs()$introns, extractor_seqs()$chrom, shared_selected_tx()$name, "intron"), f))
 
@@ -1339,7 +1475,7 @@ server <- function(input, output, session) {
     req(design_res())
     downloadButton("download_html", "⬇ Download HTML figure", class = "btn-dl")
   })
-  output$download_html <- downloadHandler(
+  output$download_html <- l2b_dl("download_html",
     filename = function() sprintf("%s_schematic.html", gsub("[^A-Za-z0-9]", "_", input$gene)),
     content = function(f) writeLines(build_html(design_res(), dark = FALSE), f))
 
@@ -1451,17 +1587,27 @@ server <- function(input, output, session) {
   cryptic_resolve_bams <- function(label) {
     workdir <- file.path(tempdir(), paste0("cryptic_", session$token))
     if (identical(input$cryptic_bam_source, "path")) {
-      resolve_local_bams(if (identical(label, "control")) input$cryptic_control_paths
+      res <- resolve_local_bams(if (identical(label, "control")) input$cryptic_control_paths
                           else input$cryptic_kd_paths, label,
                           force_reindex = isTRUE(input$cryptic_force_reindex))
+      # counts and sizes only -- never the paths, which name samples and patients
+      l2b_log("upload", tool = "cryptic", mode = "local_path", arm = label,
+              n_files = length(res$paths),
+              mb = round(sum(file.size(res$paths), na.rm = TRUE) / 1048576, 1))
+      res
     } else {
-      materialize_bam_uploads(if (identical(label, "control")) input$cryptic_control_files
-                               else input$cryptic_kd_files, label, workdir)
+      up <- if (identical(label, "control")) input$cryptic_control_files else input$cryptic_kd_files
+      res <- materialize_bam_uploads(up, label, workdir)
+      l2b_log("upload", tool = "cryptic", mode = "browser_upload", arm = label,
+              n_files = if (is.null(up)) 0L else nrow(up),
+              mb = if (is.null(up)) 0 else round(sum(up$size, na.rm = TRUE) / 1048576, 1))
+      res
     }
   }
 
   observeEvent(input$cryptic_go, {
     cryptic_err(NULL); cryptic_res(NULL)
+    t0 <- Sys.time()
     withProgress(message = "Scanning for cryptic exons...", value = 0.05, {
       tryCatch({
         incProgress(0.1, detail = "resolving locus")
@@ -1484,7 +1630,21 @@ server <- function(input, output, session) {
         cryptic_bam_info(list(control = control_bams, kd = kd_bams, assembly = input$cryptic_assembly))
         cryptic_res(res)
         cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
-      }, error = function(e) cryptic_err(conditionMessage(e)))
+
+        # What the run *was* and what it found. The locus width goes in but the
+        # coordinates don't: window size is what explains a slow run, whereas
+        # chr9:27,543,000-27,545,000 identifies the experiment.
+        l2b_log("analysis", tool = "cryptic", assembly = input$cryptic_assembly,
+                width_kb = round((locus$end - locus$start) / 1000, 1),
+                n_control = length(control_bams$paths), n_kd = length(kd_bams$paths),
+                novel_junctions = NROW(res$candidates$novel_junctions),
+                candidate_exons = NROW(res$candidates$candidate_exons),
+                secs = round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1))
+      }, error = function(e) {
+        l2b_log("analysis_failed", tool = "cryptic",
+                secs = round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1))
+        cryptic_err(conditionMessage(e))
+      })
     })
   })
 
@@ -1679,7 +1839,7 @@ server <- function(input, output, session) {
       Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
     datatable(out, rownames = FALSE, selection = "none", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)
-  output$cryptic_download_retention_csv <- downloadHandler(
+  output$cryptic_download_retention_csv <- l2b_dl("cryptic_download_retention_csv",
     filename = function() sprintf("%s_retained_introns.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
     content = function(f) write.csv(cryptic_res()$retained_introns, f, row.names = FALSE))
   output$cryptic_diff_tbl <- renderDT({
@@ -1694,16 +1854,16 @@ server <- function(input, output, session) {
       `p-value` = signif(df$p_value, 3), `q-value` = signif(df$q_value, 3),
       Novel = ifelse(df$novel, "yes", "no"), check.names = FALSE))
   }, server = FALSE)
-  output$cryptic_download_pdf <- downloadHandler(
+  output$cryptic_download_pdf <- l2b_dl("cryptic_download_pdf",
     filename = function() sprintf("%s_cryptic_exon_engine.pdf", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
     content = function(f) html_to_pdf(build_sashimi_html(cryptic_res(), dark = FALSE), f))
-  output$cryptic_download_html <- downloadHandler(
+  output$cryptic_download_html <- l2b_dl("cryptic_download_html",
     filename = function() sprintf("%s_cryptic_exon_engine.html", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
     content = function(f) writeLines(build_sashimi_html(cryptic_res(), dark = FALSE), f))
-  output$cryptic_download_csv <- downloadHandler(
+  output$cryptic_download_csv <- l2b_dl("cryptic_download_csv",
     filename = function() sprintf("%s_candidate_exons.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
     content = function(f) write.csv(cryptic_res()$candidates$candidate_exons, f, row.names = FALSE))
-  output$cryptic_download_diff_csv <- downloadHandler(
+  output$cryptic_download_diff_csv <- l2b_dl("cryptic_download_diff_csv",
     filename = function() sprintf("%s_differential_splicing.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
     content = function(f) write.csv(cryptic_res()$differential, f, row.names = FALSE))
 
@@ -1831,7 +1991,7 @@ server <- function(input, output, session) {
     updateTabsetPanel(session, "tool_tabs", selected = "cryptic")
   })
 
-  output$batch_download_csv <- downloadHandler(
+  output$batch_download_csv <- l2b_dl("batch_download_csv",
     filename = function() "panel_run_summary.csv",
     content = function(f) write.csv(batch_res()$summary, f, row.names = FALSE))
 
@@ -1900,10 +2060,10 @@ server <- function(input, output, session) {
               options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE))
   }, server = TRUE)
 
-  output$gibson_download_primers <- downloadHandler(
+  output$gibson_download_primers <- l2b_dl("gibson_download_primers",
     filename = function() "gibson_primers.csv",
     content = function(f) write.csv(gibson_res()$primers, f, row.names = FALSE))
-  output$gibson_download_junctions <- downloadHandler(
+  output$gibson_download_junctions <- l2b_dl("gibson_download_junctions",
     filename = function() "gibson_junctions.csv",
     content = function(f) write.csv(gibson_res()$junctions, f, row.names = FALSE))
 
@@ -2274,13 +2434,13 @@ server <- function(input, output, session) {
     datatable(refs, rownames = FALSE, selection = "none",
               options = list(dom = "t", paging = FALSE, ordering = FALSE, scrollX = TRUE))
   }, server = TRUE)
-  output$report_dl_order <- downloadHandler(
+  output$report_dl_order <- l2b_dl("report_dl_order",
     filename = function() "primer_ordering_sheet.csv",
     content = function(f) write.csv(ordering_sheet(report_primers(), scale = input$rep_scale, purification = input$rep_purification), f, row.names = FALSE))
-  output$report_dl_methods <- downloadHandler(
+  output$report_dl_methods <- l2b_dl("report_dl_methods",
     filename = function() "methods.txt",
     content = function(f) writeLines(report_methods_text(), f))
-  output$report_dl_refs <- downloadHandler(
+  output$report_dl_refs <- l2b_dl("report_dl_refs",
     filename = function() "methods_references.csv",
     content = function(f) write.csv(session_references(report_used()), f, row.names = FALSE))
 
@@ -2709,7 +2869,7 @@ server <- function(input, output, session) {
     req(plasmid_res())
     downloadButton("pc_download_fasta", "⬇ Download FASTA", class = "btn-dl")
   })
-  output$pc_download_fasta <- downloadHandler(
+  output$pc_download_fasta <- l2b_dl("pc_download_fasta",
     filename = function() sprintf("%s.fasta", gsub("[^A-Za-z0-9]", "_", input$pc_title)),
     content = function(f) {
       r <- plasmid_res()

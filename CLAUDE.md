@@ -76,6 +76,45 @@ Almost everything computes with plain R arithmetic or calls a real external tool
 
 The one deliberately non-deterministic piece is `local_llm.R` + `cryptic_interpret.R` (see below) — it's kept on a short leash by design, not an oversight.
 
+### Usage logging and update checks (`R/usage.R`, `R/update_check.R`)
+Two small "little things" wired into the About tab. Both have one hard rule each.
+
+**`usage.R` never talks to the network.** There is no endpoint, no key, and no
+phone-home anywhere in it — labs run patient-derived RNA-seq through this
+toolkit, so a beacon would be a liability. It appends JSON Lines to
+`l2b_data_dir()/usage/events-YYYY-MM.jsonl`: one object per line, appended and
+never rewritten, so a half-written tail (force quit) costs one event rather than
+the file, and the reader skips unparseable lines instead of aborting. Events
+carry counts, sizes, durations and tool ids — never filenames, paths, or loci,
+which name samples and patients. `LIT2BENCH_NO_USAGE_LOG=1` makes `l2b_log()` a
+no-op. `l2b_log()` never signals: a logging failure must not take down the
+analysis the user actually came for.
+
+The 20 export buttons are instrumented by constructor, not by hand: `l2b_dl(id,
+filename, content)` wraps `downloadHandler()` and derives the tool from the
+output id, so `output$x <- l2b_dl("x", ...)` is the only per-site change. Ids that
+don't follow `<tool>_dl_<what>` are aliased in `.l2b_tool_from_dl_id()`
+(`download_html` → `design`, `pc_*` → `plasmid`) — that matters because
+`by_tool` pools export events with `tool_open` events, and an un-aliased prefix
+would silently split one tool into two rows.
+
+**`update_check.R` only ever notifies.** Nothing downloads or installs: an
+analysis tool that rewrites its own code mid-experiment is a reproducibility
+problem, and an installed bundle is read-only anyway (Gatekeeper invalidates a
+mutated bundle). It reads GitHub's Releases API with one targeted regex, no JSON
+dependency, exactly like `fetch_genomic()`. The answer is cached in
+`l2b_data_dir()/update-check.json` for 24h so the common launch does a file read
+and no network call; a *failed* check is deliberately not cached, so a laptop
+that was offline at launch gets a real answer next time. Every failure path
+resolves to status `"unknown"` and the UI says nothing — this runs on air-gapped
+sequencing boxes.
+
+Use `l2b_current_version()`, not `l2b_version()`, whenever a version is needed
+for comparison or logging: the latter reads the `VERSION` file that only an
+installed bundle has, so in a checkout it is empty and the comparison is
+permanently uncomparable. `l2b_current_version()` falls back to
+`git describe --tags`.
+
 ### UI design system (`R/ui_helpers.R`)
 All CSS lives in one `L2B_CSS` string and all client JS in one `L2B_JS` string, injected once in `app.R`'s `tags$head`. Light/dark theming is CSS custom properties (`--l2b-*`) toggled via a `data-theme` attribute on `<html>`, flipped client-side with **no server round-trip** for anything styled by CSS — the only things that need the current theme server-side are the two panels that pre-render static SVG/HTML documents (primer schematic, plasmid map, sashimi plot), which take `dark`/`col` as a plain function argument, never a mutated global (matters for concurrent Shiny sessions).
 

@@ -30,7 +30,11 @@ l2b_data_dir <- function() {
 #' has no .git, but build.sh stamps a VERSION file next to app.R -- read that
 #' rather than showing the user "self-update unavailable" and nothing else.
 l2b_version <- function() {
-  v <- tryCatch(readLines("VERSION", warn = FALSE), error = function(e) character(0))
+  # suppressWarnings, not just tryCatch: a missing VERSION file makes file()
+  # *warn* before readLines errors, so a checkout (which has no VERSION) would
+  # otherwise print "cannot open file 'VERSION'" every time this is called.
+  v <- suppressWarnings(tryCatch(readLines("VERSION", warn = FALSE),
+                                 error = function(e) character(0)))
   v <- trimws(v[nzchar(trimws(v))])
   if (length(v)) v[1] else ""
 }
