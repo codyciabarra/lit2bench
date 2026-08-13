@@ -19,7 +19,7 @@
    */
   var RELEASE = {
     version: '0.1.0',
-    size: '~1.4 MB',
+    size: '~1.5 MB',
     repo: 'https://github.com/codyciabarra/lit2bench',
     asset: 'Lit2Bench-0.1.0.dmg'
   };
