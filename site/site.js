@@ -9,13 +9,17 @@
   'use strict';
 
   /* ------------------------------------------------------------- release
-   * The one place download URLs are defined. Point this at whatever the
-   * current release is; everything on the page follows from it.
+   * The *fallback* download details -- what renders immediately, and what the
+   * page keeps if the API call further down never lands. The live answer comes
+   * from GitHub's Releases API at page load, so this constant drifting behind a
+   * tag is no longer fatal.
    *
-   * `latest/download/<asset>` is a GitHub redirect that always resolves to the
-   * newest release's asset, so this keeps working across releases without an
-   * edit here -- but the asset filename carries the version, so `version` and
-   * `asset` do have to move together.
+   * It still has to name an asset that exists. `latest/download/<asset>` is a
+   * GitHub redirect to the newest release's copy of that filename, so it follows
+   * new releases on its own -- but the filename carries the version, and a name
+   * no release ever published 404s. That is exactly what shipped at v0.1.0: the
+   * site advertised Lit2Bench-0.1.0.dmg before any release was tagged, so the
+   * button was dead. Bump `version` and `asset` together when you tag.
    */
   var RELEASE = {
     version: '0.1.0',
@@ -24,6 +28,28 @@
     asset: 'Lit2Bench-0.1.0.dmg'
   };
   RELEASE.url = RELEASE.repo + '/releases/latest/download/' + RELEASE.asset;
+
+  /* ----------------------------------------------------------- analytics
+   * Cloudflare Web Analytics: visitor counts with no cookies, no localStorage
+   * and no cross-site identifiers, which is why it needs no consent banner.
+   *
+   * Paste the beacon token from the Cloudflare dashboard below to switch it on.
+   * While it's empty nothing is injected at all -- no script tag, no request, no
+   * console error -- so an unconfigured site is simply a site without analytics
+   * rather than a site with a broken one.
+   *
+   * It has to be the manual beacon rather than Cloudflare's automatic setup:
+   * automatic injection only works for proxied (orange-cloud) hostnames, and
+   * these records are deliberately DNS-only so GitHub can hold the TLS cert.
+   */
+  var ANALYTICS_TOKEN = '';
+  if (ANALYTICS_TOKEN) {
+    var beacon = document.createElement('script');
+    beacon.defer = true;
+    beacon.src = 'https://static.cloudflareinsights.com/beacon.min.js';
+    beacon.setAttribute('data-cf-beacon', JSON.stringify({ token: ANALYTICS_TOKEN }));
+    document.head.appendChild(beacon);
+  }
 
   var reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
   var $  = function (s, r) { return (r || document).querySelector(s); };
@@ -45,6 +71,37 @@
       $('#dl-sub').textContent =
         'macOS only for now — on Windows or Linux, run from source (see right).';
     }
+
+    /* Ask GitHub what the newest release actually is, and correct the button.
+     *
+     * The hardcoded RELEASE above is the fallback, not the source of truth. It
+     * has to be *a* real asset name because that's what renders before this
+     * request lands (and all that renders if it never does) -- but when the
+     * constant drifts behind a tag, as it did at v0.1.0 when the site advertised
+     * an asset no release had ever published, this repairs the button instead of
+     * serving a 404 to every visitor.
+     *
+     * Deliberately not awaited and never fatal: the download link is already
+     * usable when this fires, so a rate-limited or offline API leaves the page
+     * exactly as it was. GitHub allows 60 unauthenticated calls an hour per IP,
+     * which is per-visitor here, so one call per page load is well inside it.
+     */
+    fetch('https://api.github.com/repos/codyciabarra/lit2bench/releases/latest',
+          { headers: { Accept: 'application/vnd.github+json' } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) {
+        if (!rel || !rel.tag_name) return;
+        var dmg = (rel.assets || []).filter(function (a) {
+          return /\.dmg$/i.test(a.name);
+        })[0];
+        if (!dmg) return;   // a release with no .dmg (source-only tag): leave the fallback
+
+        dlBtn.href = dmg.browser_download_url;
+        $('#dl-version').textContent = String(rel.tag_name).replace(/^v/, '');
+        // Real bytes beat a hand-maintained "~1.5 MB" that nobody remembers to bump.
+        $('#dl-size').textContent = '~' + (dmg.size / 1048576).toFixed(1) + ' MB';
+      })
+      .catch(function () { /* offline or rate-limited -- fallback already rendered */ });
   }
   var year = $('#year');
   if (year) year.textContent = new Date().getFullYear();
