@@ -34,7 +34,13 @@ jobs:
 
       - name: Record today's counts
         env:
-          GH_TOKEN: ${{ github.token }}
+          # The default token cannot read the traffic endpoints -- they answer
+          # 403 "Resource not accessible by integration" -- so views/clones stay
+          # empty on scheduled runs. Downloads, the number that actually
+          # matters, need no special scope. To fill the traffic columns too,
+          # add a PAT with repo scope as the L2B_TRAFFIC_TOKEN secret; the
+          # fallback keeps the workflow working when it isn't set.
+          GH_TOKEN: ${{ secrets.L2B_TRAFFIC_TOKEN || github.token }}
         run: ./scripts/download-stats.sh
 
       - name: Commit if the numbers moved

@@ -45,11 +45,25 @@ fi
 total=$(printf '%s\n' "$assets" | awk -F'\t' '{s+=$3} END{print s+0}')
 
 # ------------------------------------------------------------------ traffic
-# Views/clones need push access and GitHub keeps only 14 days, so these are
-# best-effort: a token without the right scope must not fail the whole run,
-# it just leaves the columns empty for that day.
+# Views/clones need push access, which a workflow's default GITHUB_TOKEN does
+# not have -- it gets 403 "Resource not accessible by integration". These
+# columns are therefore best-effort and will be empty on scheduled runs unless
+# the workflow is given a PAT with repo scope as GH_TOKEN (see the
+# L2B_TRAFFIC_TOKEN secret in .github/workflows/download-stats.yml). Run from a
+# normal `gh auth login` locally, they populate fine.
+#
+# The output is validated rather than trusted. `gh` prints API errors as JSON on
+# *stdout*, so redirecting stderr does not stop a 403 body being captured, and
+# that body contains commas -- which silently corrupted both the value and the
+# column alignment of every row before this check existed.
 tr_get () {
-  gh api "repos/$REPO/traffic/$1" --jq "\"\(.count)\t\(.uniques)\"" 2>/dev/null || printf '\t'
+  local out
+  out=$(gh api "repos/$REPO/traffic/$1" --jq '[.count, .uniques] | @tsv' 2>/dev/null) || { printf '\t'; return; }
+  if printf '%s' "$out" | grep -qE '^[0-9]+'$'\t''[0-9]+$'; then
+    printf '%s' "$out"
+  else
+    printf '\t'    # unavailable (403, rate limit, unexpected shape): record nothing
+  fi
 }
 IFS=$'\t' read -r views uviews  <<<"$(tr_get views)"
 IFS=$'\t' read -r clones uclones <<<"$(tr_get clones)"
@@ -71,8 +85,12 @@ echo "Lit2Bench downloads -- $today"
 printf '%s\n' "$assets" | awk -F'\t' '{printf "  %-28s %-26s %6d\n", $1, $2, $3}'
 echo "  ------------------------------------------------------------------"
 printf '  %-55s %6d\n' "total downloads (all releases, all time)" "$total"
-[ -n "${clones:-}" ] && printf '  %-55s %6s (%s unique)\n' "clones, last 14d" "$clones" "$uclones"
-[ -n "${views:-}"  ] && printf '  %-55s %6s (%s unique)\n' "views, last 14d"  "$views"  "$uviews"
+if [ -n "${clones:-}" ]; then
+  printf '  %-55s %6s (%s unique)\n' "clones, last 14d" "$clones" "$uclones"
+  printf '  %-55s %6s (%s unique)\n' "views, last 14d"  "$views"  "$uviews"
+else
+  echo "  (traffic unavailable -- needs a token with push access; see header)"
+fi
 
 # ------------------------------------------------------------------- delta
 # Compare against the most recent earlier date in the file, so the number shown

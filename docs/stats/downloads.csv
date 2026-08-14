@@ -1,2 +1,2 @@
 date,tag,asset,downloads,total_downloads,views_14d,unique_views_14d,clones_14d,unique_clones_14d
-2026-08-14,v0.1.0,Lit2Bench-0.1.0.dmg,3,3,{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/metrics/traffic#get-page-views","status":"403"},,{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/metrics/traffic#get-repository-clones","status":"403"},
+2026-08-14,v0.1.0,Lit2Bench-0.1.0.dmg,3,3,0,0,49,28
