@@ -1,0 +1,54 @@
+# Snapshot release-download counts once a day.
+#
+# GitHub reports `download_count` as a running total and keeps no history, and
+# the traffic API (views/clones) discards anything older than 14 days. Both are
+# therefore lossy unless something writes them down on a schedule -- that is the
+# only reason this workflow exists.
+#
+# It commits to docs/stats/downloads.csv on main. That path is deliberately
+# outside site/**, so a stats commit does not retrigger the Pages deploy.
+
+name: Download stats
+
+on:
+  schedule:
+    # 07:10 UTC daily. Deliberately not on the hour: GitHub delays scheduled
+    # jobs when the top of the hour is congested, and an off-peak minute is far
+    # more likely to actually fire near its slot.
+    - cron: '10 7 * * *'
+  workflow_dispatch:
+
+# Only what's needed to read the API and push the one CSV back.
+permissions:
+  contents: write
+
+concurrency:
+  group: download-stats
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record today's counts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/download-stats.sh
+
+      - name: Commit if the numbers moved
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # --quiet exits non-zero when there IS a change, hence the negation:
+          # no diff means nothing to record today and the run should end clean
+          # rather than pushing an empty commit.
+          if git diff --quiet -- docs/stats/downloads.csv; then
+            echo "No change in download counts today."
+            exit 0
+          fi
+          git add docs/stats/downloads.csv
+          git commit -m "Download stats: $(date -u +%Y-%m-%d)"
+          git push
