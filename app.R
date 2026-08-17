@@ -1000,14 +1000,15 @@ server <- function(input, output, session) {
       return(l2b_empty("\U0001f4ca", "Nothing logged yet",
                        "Counts appear here as you open tools, run analyses and export files."))
 
-    top <- if (length(s$by_tool))
-      paste(sprintf("%s (%d)", names(s$by_tool), as.integer(s$by_tool))[seq_len(min(5, length(s$by_tool)))],
+    # runs, not opens -- see the note on by_tool_runs in l2b_usage_summary()
+    top <- if (length(s$by_tool_runs))
+      paste(sprintf("%s (%d)", names(s$by_tool_runs), as.integer(s$by_tool_runs))[seq_len(min(5, length(s$by_tool_runs)))],
             collapse = " · ") else "\U2014"
 
     tagList(
       l2b_hero(
         l2b_stat("Sessions", s$sessions),
-        l2b_stat("Analyses", s$analyses),
+        l2b_stat("Tool runs", s$runs),
         l2b_stat("Exports", s$exports),
         l2b_stat("BAM loads", s$uploads)),
       div(style = "margin-top:12px; font-size:13px; color:var(--l2b-text);",
@@ -1038,6 +1039,7 @@ server <- function(input, output, session) {
   # ---- TRANSCRIPT EXPLORER ----
   explorer_res <- reactiveVal(NULL); explorer_err <- reactiveVal(NULL)
   observeEvent(input$explorer_go, {
+    l2b_log("run", tool = "explorer")
     explorer_err(NULL); explorer_res(NULL)
     out <- tryCatch(explorer_search(input$explorer_query, assembly = input$explorer_assembly), error = function(e) e)
     if (inherits(out, "error")) explorer_err(conditionMessage(out)) else explorer_res(out)
@@ -1606,6 +1608,7 @@ server <- function(input, output, session) {
   }
 
   observeEvent(input$cryptic_go, {
+    l2b_log("run", tool = "cryptic")
     cryptic_err(NULL); cryptic_res(NULL)
     t0 <- Sys.time()
     withProgress(message = "Scanning for cryptic exons...", value = 0.05, {
@@ -1902,6 +1905,7 @@ server <- function(input, output, session) {
   batch_res <- reactiveVal(NULL); batch_err <- reactiveVal(NULL)
 
   observeEvent(input$batch_go, {
+    l2b_log("run", tool = "batch")
     batch_err(NULL); batch_res(NULL)
     tryCatch({
       control_bams <- resolve_local_bams(input$batch_control_paths, "control")
@@ -1998,6 +2002,7 @@ server <- function(input, output, session) {
   # ---- GIBSON ASSEMBLY ----
   gibson_res <- reactiveVal(NULL); gibson_err <- reactiveVal(NULL)
   observeEvent(input$gibson_go, {
+    l2b_log("run", tool = "gibson")
     gibson_err(NULL); gibson_res(NULL)
     tryCatch({
       frags <- parse_fragments(input$gibson_fragments)
@@ -2084,6 +2089,7 @@ server <- function(input, output, session) {
     recs
   }
   observeEvent(input$pqc_go, {
+    l2b_log("run", tool = "plasmidqc")
     pqc_err(NULL); pqc_res(NULL); pqc_ncbi(NULL)
     out <- tryCatch({
       refs <- .pqc_records(input$pqc_ref_files, input$pqc_ref)
@@ -2201,6 +2207,7 @@ server <- function(input, output, session) {
   })
   qpcr_res <- reactiveVal(NULL); qpcr_err <- reactiveVal(NULL)
   observeEvent(input$qpcr_go, {
+    l2b_log("run", tool = "qpcr")
     qpcr_err(NULL); qpcr_res(NULL)
     df <- qpcr_grid()
     df <- df[!is.na(df[[2]]) & !is.na(df[[3]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
@@ -2262,6 +2269,7 @@ server <- function(input, output, session) {
   })
   dens_res <- reactiveVal(NULL); dens_err <- reactiveVal(NULL)
   observeEvent(input$dens_go, {
+    l2b_log("run", tool = "dens")
     dens_err(NULL); dens_res(NULL)
     df <- dens_grid()
     df <- df[!is.na(df[[2]]) & !is.na(df[[3]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
@@ -2303,6 +2311,7 @@ server <- function(input, output, session) {
   # ---- STANDARD CURVE ----
   sc_res <- reactiveVal(NULL); sc_err <- reactiveVal(NULL)
   observeEvent(input$sc_go, {
+    l2b_log("run", tool = "sc")
     sc_err(NULL); sc_res(NULL)
     std <- sc_std_grid(); samp <- sc_samp_grid()
     std <- std[!is.na(std[[1]]) & !is.na(std[[2]]), , drop = FALSE]
@@ -2624,6 +2633,7 @@ server <- function(input, output, session) {
   # ---- NORMALIZATION ----
   norm_res <- reactiveVal(NULL); norm_err <- reactiveVal(NULL)
   observeEvent(input$norm_go, {
+    l2b_log("run", tool = "norm")
     norm_err(NULL); norm_res(NULL)
     df <- norm_grid()
     df <- df[!is.na(df[[2]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
@@ -2666,6 +2676,7 @@ server <- function(input, output, session) {
   # ---- A280 ----
   a280_res <- reactiveVal(NULL); a280_err <- reactiveVal(NULL)
   observeEvent(input$a280_go, {
+    l2b_log("run", tool = "a280")
     a280_err(NULL); a280_res(NULL)
     df <- a280_grid()
     df <- df[!is.na(df[[2]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
@@ -2704,6 +2715,7 @@ server <- function(input, output, session) {
   # ---- PROTEIN PARAMS ----
   pp_res <- reactiveVal(NULL); pp_err <- reactiveVal(NULL)
   observeEvent(input$pp_go, {
+    l2b_log("run", tool = "pp")
     pp_err(NULL); pp_res(NULL)
     if (!nzchar(trimws(input$pp_sequence))) { pp_err("Enter a sequence."); return(invisible()) }
     out <- tryCatch(protein_parameters(input$pp_sequence), error = function(e) e)
@@ -2734,6 +2746,7 @@ server <- function(input, output, session) {
   # ---- DILUTION ----
   dil_res <- reactiveVal(NULL); dil_err <- reactiveVal(NULL)
   observeEvent(input$dil_go, {
+    l2b_log("run", tool = "dil")
     dil_err(NULL); dil_res(NULL)
     df <- dil_grid()
     df <- df[!is.na(df[[2]]) & !is.na(df[[3]]) & !is.na(df[[4]]) & nzchar(trimws(df[[1]])), , drop = FALSE]
@@ -2774,6 +2787,7 @@ server <- function(input, output, session) {
   # ---- PCR SETUP ----
   pcr_res <- reactiveVal(NULL); pcr_err <- reactiveVal(NULL)
   observeEvent(input$pcr_go, {
+    l2b_log("run", tool = "pcr")
     pcr_err(NULL); pcr_res(NULL)
     pool <- pcr_pool_grid(); fix <- pcr_fix_grid()
     pool <- pool[!is.na(pool[[2]]) & !is.na(pool[[3]]) & nzchar(trimws(pool[[1]])), , drop = FALSE]
@@ -2831,6 +2845,7 @@ server <- function(input, output, session) {
   # ---- PLASMID ----
   plasmid_res <- reactiveVal(NULL); plasmid_err <- reactiveVal(NULL)
   observeEvent(input$pc_go, {
+    l2b_log("run", tool = "plasmid")
     plasmid_err(NULL); plasmid_res(NULL)
     df <- plasmid_grid()
     df <- df[nzchar(trimws(df[[1]])) & nzchar(trimws(df[[3]])), , drop = FALSE]

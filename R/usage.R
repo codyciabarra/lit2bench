@@ -101,29 +101,37 @@ l2b_usage_events <- function() {
 #' the caller should not have to branch on "no log file".
 l2b_usage_summary <- function() {
   ev <- l2b_usage_events()
-  empty <- list(n = 0L, sessions = 0L, analyses = 0L, exports = 0L, uploads = 0L,
-                by_tool = integer(0), by_event = integer(0),
-                first = NA_character_, last = NA_character_,
+  empty <- list(n = 0L, sessions = 0L, runs = 0L, analyses = 0L, exports = 0L,
+                uploads = 0L, by_tool = integer(0), by_tool_runs = integer(0),
+                by_event = integer(0), first = NA_character_, last = NA_character_,
                 enabled = l2b_usage_enabled(), dir = l2b_usage_dir())
   if (!length(ev)) return(empty)
 
   kinds <- .l2b_field(ev, "event")
   tools <- .l2b_field(ev, "tool")
   ts    <- .l2b_field(ev, "ts")
-  tools <- tools[!is.na(tools) & nzchar(tools)]
+  named <- !is.na(tools) & nzchar(tools)
+
+  # by_tool_runs counts only "run" events, and it -- not by_tool -- is what
+  # "most-used tool" should be read from. by_tool pools opens, runs and exports,
+  # so a tool you clicked into and immediately left ranks alongside one you
+  # actually computed with; that flatters the wrong tools.
+  run_tools <- tools[named & kinds == "run"]
 
   list(
-    n        = length(ev),
-    sessions = sum(kinds == "session_start", na.rm = TRUE),
-    analyses = sum(kinds == "analysis", na.rm = TRUE),
-    exports  = sum(kinds == "export", na.rm = TRUE),
-    uploads  = sum(kinds == "upload", na.rm = TRUE),
-    by_tool  = sort(table(tools), decreasing = TRUE),
-    by_event = sort(table(kinds), decreasing = TRUE),
-    first    = if (length(ts)) min(ts, na.rm = TRUE) else NA_character_,
-    last     = if (length(ts)) max(ts, na.rm = TRUE) else NA_character_,
-    enabled  = l2b_usage_enabled(),
-    dir      = l2b_usage_dir())
+    n            = length(ev),
+    sessions     = sum(kinds == "session_start", na.rm = TRUE),
+    runs         = sum(kinds == "run", na.rm = TRUE),
+    analyses     = sum(kinds == "analysis", na.rm = TRUE),
+    exports      = sum(kinds == "export", na.rm = TRUE),
+    uploads      = sum(kinds == "upload", na.rm = TRUE),
+    by_tool      = sort(table(tools[named]), decreasing = TRUE),
+    by_tool_runs = if (length(run_tools)) sort(table(run_tools), decreasing = TRUE) else integer(0),
+    by_event     = sort(table(kinds), decreasing = TRUE),
+    first        = if (length(ts)) min(ts, na.rm = TRUE) else NA_character_,
+    last         = if (length(ts)) max(ts, na.rm = TRUE) else NA_character_,
+    enabled      = l2b_usage_enabled(),
+    dir          = l2b_usage_dir())
 }
 
 #' Which tool an export button belongs to, from its output id.

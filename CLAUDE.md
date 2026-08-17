@@ -98,6 +98,16 @@ don't follow `<tool>_dl_<what>` are aliased in `.l2b_tool_from_dl_id()`
 `by_tool` pools export events with `tool_open` events, and an un-aliased prefix
 would silently split one tool into two rows.
 
+The 14 compute tools each log a `run` event as the first line of their
+`observeEvent(input$<tool>_go, ...)` body. **Rank tools by `by_tool_runs`, not
+`by_tool`**: the latter pools opens, runs, uploads and exports, so a tool you
+clicked into and left immediately ranks beside one you actually computed with
+(seeded test data: `cryptic` reads 6 pooled vs 2 real runs). The Cryptic Engine
+additionally logs `analysis`/`analysis_failed` with what the run found, because
+there the result counts are the interesting part. The four `*_design_*_go`
+observers are deliberately *not* instrumented — they navigate and prefill rather
+than compute, and counting them as design runs would inflate that tool.
+
 **`update_check.R` only ever notifies.** Nothing downloads or installs: an
 analysis tool that rewrites its own code mid-experiment is a reproducibility
 problem, and an installed bundle is read-only anyway (Gatekeeper invalidates a

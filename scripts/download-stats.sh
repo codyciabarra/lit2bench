@@ -35,7 +35,21 @@ today=$(date -u +%Y-%m-%d)
 # One row per asset, so a release with several artifacts stays legible and a
 # per-asset trend survives adding a second platform later.
 assets=$(gh api "repos/$REPO/releases" --paginate \
-  --jq '.[] | .tag_name as $t | .assets[] | [$t, .name, .download_count] | @tsv')
+  --jq '.[] | .tag_name as $t | .assets[] | [$t, .name, .download_count] | @tsv' 2>/dev/null || true)
+
+if [ -z "$assets" ]; then
+  # GitHub's /releases list has been observed returning [] while
+  # /releases/latest still reports the release and its assets (confirmed both
+  # authenticated and not, so it is server-side, not a gh cache). Falling back
+  # matters because an empty list is indistinguishable from "no releases exist":
+  # without this the scheduled run records nothing, exits 0, and tracking stops
+  # dead with no signal that anything is wrong.
+  assets=$(gh api "repos/$REPO/releases/latest" \
+    --jq '.tag_name as $t | .assets[] | [$t, .name, .download_count] | @tsv' 2>/dev/null || true)
+  if [ -n "$assets" ]; then
+    echo "note: /releases returned empty; fell back to /releases/latest" >&2
+  fi
+fi
 
 if [ -z "$assets" ]; then
   echo "No release assets found for $REPO -- nothing to record."
@@ -106,4 +120,28 @@ if [ "$DRY" -eq 0 ] && [ -f "$OUT" ]; then
   fi
   echo
   echo "Recorded in $OUT"
+fi
+
+# -------------------------------------------------------------- local usage
+# Downloads say how many people fetched the app; they say nothing about whether
+# anyone used it. That answer lives in the local usage log, which never leaves
+# the machine -- so this half is *your own* activity only, never other users'.
+# Printed here so one command covers both halves instead of two.
+usage_dir="${LIT2BENCH_DATA_DIR:-.}/usage"
+if [ -d "$usage_dir" ] && ls "$usage_dir"/events-*.jsonl >/dev/null 2>&1; then
+  echo
+  echo "Local usage (this machine only)"
+  jq -rs '
+    (map(select(.event == "session_start")) | length) as $sessions
+    | (map(select(.event == "run"))         | length) as $runs
+    | (map(select(.event == "export"))      | length) as $exports
+    | (map(select(.event == "upload"))      | length) as $uploads
+    | (map(select(.event == "run") | .tool) | group_by(.) | map({t: .[0], n: length})
+       | sort_by(-.n) | .[:5] | map("\(.t) (\(.n))") | join(" . ")) as $top
+    | "  sessions: \($sessions)   tool runs: \($runs)   exports: \($exports)   BAM loads: \($uploads)",
+      "  most-used: \(if $top == "" then "—" else $top end)"
+  ' "$usage_dir"/events-*.jsonl 2>/dev/null || echo "  (could not parse the usage log)"
+else
+  echo
+  echo "Local usage: no events logged yet ($usage_dir)"
 fi
