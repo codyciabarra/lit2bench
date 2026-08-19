@@ -113,12 +113,21 @@ SASHIMI_DARK_COL <- list(
   seq(ceiling(lo / step) * step, hi, by = step)
 }
 
-#' Format a bp coordinate compactly for axis labels (e.g. 17.64 Mb, 320 kb).
-#' Also duplicated as fmtBp() in SASHIMI_JS -- same reason as .nice_ticks().
-.fmt_bp <- function(bp) {
-  if (bp >= 1e6) sprintf("%.2f Mb", bp / 1e6)
-  else if (bp >= 1e3) sprintf("%.0f kb", bp / 1e3)
-  else sprintf("%d bp", as.integer(bp))
+#' Format a bp coordinate for an axis label, given the TICK SPACING.
+#'
+#' The spacing is the whole point. The old version formatted Mb to two decimals
+#' regardless, so a 7 kb window -- now trivially reachable, since zoom is a drag
+#' away rather than a round trip -- drew nine ticks all reading "6.54 Mb". The
+#' rule here is: pick the unit from the window, then carry exactly enough
+#' decimals for one step to change the last digit.
+#'
+#' Duplicated as fmtBp() in SASHIMI_JS -- same reason as .nice_ticks().
+.fmt_bp <- function(bp, step = NULL) {
+  if (is.null(step) || !is.finite(step) || step <= 0) step <- max(1, bp / 100)
+  dec <- function(div) max(0, ceiling(-log10(step / div)))
+  if (bp >= 1e6 && step >= 1e4) sprintf("%.*f Mb", dec(1e6), bp / 1e6)
+  else if (bp >= 1e3 && step >= 10) sprintf("%.*f kb", dec(1e3), bp / 1e3)
+  else format(round(bp), big.mark = ",", trim = TRUE)
 }
 
 #' Filled coverage-area path through evenly spaced bins, closed to a baseline.
@@ -310,11 +319,18 @@ SASHIMI_DARK_COL <- list(
   }
   lbl <- transcript$name[1]
   strand_txt <- if (dir < 0) "(- strand)" else "(+ strand)"
+  # data-clamp: keep these two pinned inside the drawing region rather than
+  # letting them scroll away. A transcript is usually wider than the view, so a
+  # label positioned at its start would vanish the moment you pan into the gene
+  # -- which is exactly when you most want to know which transcript you are
+  # looking at. Clamped labels stick to the gutter, like IGV's track names.
   L <- c(L, .lbl(px_l, y_top + 14,
                  sprintf('%s <tspan fill="%s" font-weight="500">%s</tspan>', lbl, col$muted, strand_txt),
-                 bp = tx_lo, `font-size` = "13", `font-weight` = "700", fill = col$ink))
+                 bp = tx_lo, class = "sashimi-sticky", `data-clamp` = "start",
+                 `font-size` = "13", `font-weight` = "700", fill = col$ink))
   if (!is.null(note)) {
-    L <- c(L, .lbl(px_r, y_top + 14, note, bp = tx_hi, `text-anchor` = "end",
+    L <- c(L, .lbl(px_r, y_top + 14, note, bp = tx_hi, class = "sashimi-sticky",
+                   `data-clamp` = "end", `text-anchor` = "end",
                    `font-size` = "11.5", fill = col$faint))
   }
   list(geom = paste(s, collapse = ""), labels = paste(L, collapse = ""),
@@ -331,10 +347,12 @@ SASHIMI_DARK_COL <- list(
   s <- character(0); L <- character(0)
   s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
                      gx(start), y_top, gx(end), y_top, col$muted))
-  for (t in .nice_ticks(start, end)) {
+  ticks <- .nice_ticks(start, end)
+  tick_step <- if (length(ticks) > 1) ticks[2] - ticks[1] else max(1, (end - start) / 9)
+  for (t in ticks) {
     s <- c(s, sprintf('<line class="sashimi-tick" x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
                       gx(t), y_top, gx(t), y_top + 6, col$muted))
-    L <- c(L, .lbl(x_left + (gx(t) - gx(start)) * px_per_bp, y_top + 20, .fmt_bp(t), bp = t,
+    L <- c(L, .lbl(x_left + (gx(t) - gx(start)) * px_per_bp, y_top + 20, .fmt_bp(t, tick_step), bp = t,
                    class = "sashimi-ticklabel", `text-anchor` = "middle", `font-size` = "10.5",
                    `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", fill = col$muted))
   }
@@ -390,10 +408,22 @@ sashimi_svg <- function(result, dark = FALSE) {
   #   data-view-*       the window currently on screen (moves as you pan)
   #   data-render-*     the window this SVG actually has data for; panning
   #                     outside it shows nothing, which is what triggers a tile
+  #   data-bin-bp       width of one coverage bin, derived from the coverage
+  #                     vector itself rather than an assumed bin count -- it is
+  #                     what tells the client the picture has stopped being at
+  #                     full resolution and needs a re-read
   #   data-tile-*       the buffered span the server can serve from cache
   #   data-orig-*       what "Reset view" returns to -- the originally requested
   #                     locus, carried forward unchanged through every zoom step
   #   data-x-left/right the pixel drawing region the transform maps onto
+  # what SASHIMI_JS needs to redraw the strand chevrons at a new view: they are
+  # pixel-spaced decoration, so they cannot simply ride along with the genomic
+  # layer and have to be regenerated from the transcript's span on every move.
+  gene_attrs <- if (is.null(result$transcript)) "" else sprintf(
+    ' data-gene-start="%d" data-gene-end="%d" data-gene-y="%.1f" data-gene-dir="%d" data-gene-col="%s"',
+    min(result$transcript$start), max(result$transcript$end), y_gene + GENE_H / 2 + 6,
+    if (identical(result$transcript$strand[1], "-")) -1L else 1L, COL$intron)
+
   orig_start <- if (is.null(result$orig_start)) result$start else result$orig_start
   orig_end <- if (is.null(result$orig_end)) result$end else result$orig_end
   tile_start <- if (is.null(result$tile_start)) result$start else result$tile_start
@@ -404,11 +434,13 @@ sashimi_svg <- function(result, dark = FALSE) {
     '<svg viewBox="0 0 %d %d" data-native-width="%d" data-origin="%d" ',
     'data-view-start="%d" data-view-end="%d" data-render-start="%d" data-render-end="%d" ',
     'data-tile-start="%d" data-tile-end="%d" data-orig-start="%d" data-orig-end="%d" ',
-    'data-x-left="%d" data-x-right="%d" ',
+    'data-x-left="%d" data-x-right="%d" data-axis-y="%.1f" data-bin-bp="%.4f" data-tick-col="%s" data-ink-col="%s"%s ',
     'xmlns="http://www.w3.org/2000/svg" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" ',
     'role="img" aria-label="IGV-style sashimi plot: control vs knockdown coverage and splice junctions">'),
     W, H, W, origin, view_start, view_end, result$start, result$end,
-    tile_start, tile_end, orig_start, orig_end, x_left, x_right))
+    tile_start, tile_end, orig_start, orig_end, x_left, x_right,
+    y_axis, (result$end - result$start) / max(1, length(result$control$coverage)),
+    COL$muted, COL$ink, gene_attrs))
 
   # panel backdrop -- pixel space, outside the geometry layer, so it stays put
   s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="8" fill="%s" stroke="%s"/>',
@@ -609,36 +641,6 @@ SASHIMI_JS <- "
 </style>
 <script>
 (function(){
-  // click-and-drag panning -- the figure is only ever wider than its
-  // container (see sashimi_svg()'s inline width style) for junction-dense
-  // loci, at which point overflow-x:auto alone only gives a scrollbar; this
-  // is what the figure caption's 'drag to scroll' has always promised.
-  // A plain click (no movement past the threshold) is left alone so pinning
-  // a junction/candidate-exon tooltip still works; an actual drag swallows
-  // the click that follows mouseup so it doesn't also pin/unpin underneath.
-  document.addEventListener('mousedown', function(e){
-    var box = e.target.closest ? e.target.closest('.l2b-sashimi') : null;
-    if (!box || e.button !== 0) return;
-    var startX = e.pageX, startScroll = box.scrollLeft, dragged = false;
-    function onMove(e2){
-      var dx = e2.pageX - startX;
-      if (!dragged && Math.abs(dx) > 4) { dragged = true; box.classList.add('l2b-sashimi-dragging'); }
-      if (dragged) { box.scrollLeft = startScroll - dx; e2.preventDefault(); }
-    }
-    function onUp(){
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      box.classList.remove('l2b-sashimi-dragging');
-      if (dragged) {
-        var swallow = function(ce){ ce.stopPropagation(); ce.preventDefault(); };
-        document.addEventListener('click', swallow, { capture: true, once: true });
-      }
-    }
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
-})();
-(function(){
   function ensureTooltip(){
     var t = document.getElementById('l2b-sashimi-tooltip');
     if (!t) {
@@ -766,46 +768,344 @@ SASHIMI_JS <- "
   function exitFs(){ (document.exitFullscreen || document.webkitExitFullscreen || function(){}).call(document); }
   function fsElement(){ return document.fullscreenElement || document.webkitFullscreenElement || null; }
 
-  // IGV-style zoom: re-runs detection at a new window (app.R's
-  // cryptic_zoom_to observer, via run_cryptic_detection() against the
-  // already-resolved/cached BAMs -- see R/cryptic_exon_bam.R) rather than
-  // anything client-side, since the coverage/junctions/candidates all
-  // genuinely depend on which window is being read.
+  // ----------------------------------------------------------------------
+  // LIVE NAVIGATION
+  //
+  // Panning and zooming are pure client-side attribute writes: one transform
+  // on .sashimi-geom, plus repositioning the pixel-space labels from their
+  // data-bp. Nothing here asks the server for a picture. The server is only
+  // involved when the view runs out of DATA -- either off the edge of what was
+  // rendered, or zoomed in past the resolution the current bins can honestly
+  // support -- and that is a tile request, not a re-render.
+  //
+  // Two invariants worth keeping:
+  //   * the DOM box size never enters the math. sx is computed in viewBox user
+  //     units, so a drag-resized or expanded figure pans identically.
+  //   * a view is never allowed outside the RENDERED window. Panning into a
+  //     region with no data would show an empty plot that looks like a result.
+  // ----------------------------------------------------------------------
   var MIN_ZOOM_BP = 40;
-  function sendZoom(start, end){
-    if (end - start < MIN_ZOOM_BP) {
-      var mid = (start + end) / 2; start = mid - MIN_ZOOM_BP / 2; end = mid + MIN_ZOOM_BP / 2;
-    }
-    if (start < 1) { end += (1 - start); start = 1; }
-    if (window.Shiny && Shiny.setInputValue) {
-      Shiny.setInputValue('cryptic_zoom_to', { start: Math.round(start), end: Math.round(end) }, { priority: 'event' });
+  function figBox(){ return document.querySelector('.l2b-sashimi'); }
+  function figSvg(){ var b = figBox(); return b && b.querySelector('svg'); }
+  function num(svg, k){ return Number(svg.dataset[k]); }
+  function currentView(svg){ return { start: num(svg,'viewStart'), end: num(svg,'viewEnd') }; }
+  function renderWin(svg){ return { start: num(svg,'renderStart'), end: num(svg,'renderEnd') }; }
+  function geomG(svg){ return svg.querySelector('.sashimi-geom'); }
+  function scaleFor(svg, start, end){
+    return (num(svg,'xRight') - num(svg,'xLeft')) / Math.max(1, end - start);
+  }
+
+  // .nice_ticks() / .fmt_bp() from sashimi_plot.R. Duplicated on purpose and
+  // unavoidably: the static export has no JS, and the live view has no server.
+  // Change the stepping in one, change it in the other.
+  function niceTicks(lo, hi, target){
+    target = target || 9;
+    var span = Math.max(1, hi - lo), raw = span / target;
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), norm = raw / mag;
+    var step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+    var out = [];
+    for (var t = Math.ceil(lo / step) * step; t <= hi; t += step) out.push(t);
+    return out;
+  }
+  function fmtBp(bp, step){
+    if (!(step > 0)) step = Math.max(1, bp / 100);
+    var dec = function(div){ return Math.max(0, Math.ceil(-Math.log(step / div) / Math.LN10)); };
+    if (bp >= 1e6 && step >= 1e4) return (bp / 1e6).toFixed(dec(1e6)) + ' Mb';
+    if (bp >= 1e3 && step >= 10) return (bp / 1e3).toFixed(dec(1e3)) + ' kb';
+    return Math.round(bp).toLocaleString();
+  }
+  function svgEl(name, attrs){
+    var e = document.createElementNS('http://www.w3.org/2000/svg', name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  // The ruler is rebuilt, not panned: the round numbers themselves change as
+  // you zoom, and a ruler that slid its old labels along would be worse than
+  // no ruler at all.
+  function rebuildAxis(svg, start, end, pxOf){
+    var g = geomG(svg), labels = svg.querySelector('.sashimi-labels');
+    if (!g || !labels) return;
+    var origin = num(svg,'origin'), y = num(svg,'axisY'), col = svg.dataset.tickCol;
+    Array.prototype.forEach.call(g.querySelectorAll('.sashimi-tick'), function(n){ n.remove(); });
+    Array.prototype.forEach.call(labels.querySelectorAll('.sashimi-ticklabel'), function(n){ n.remove(); });
+    var ticks = niceTicks(start, end);
+    var step = ticks.length > 1 ? ticks[1] - ticks[0] : Math.max(1, (end - start) / 9);
+    ticks.forEach(function(t){
+      var gxv = t - origin;
+      g.appendChild(svgEl('line', { 'class':'sashimi-tick', x1:gxv, y1:y, x2:gxv, y2:y + 6,
+        stroke:col, 'stroke-width':'1.2', 'vector-effect':'non-scaling-stroke' }));
+      var tl = svgEl('text', { 'class':'sashimi-lbl sashimi-ticklabel', 'data-bp':Math.round(t),
+        x:pxOf(t).toFixed(1), y:y + 20, 'text-anchor':'middle', 'font-size':'10.5',
+        'font-family':'ui-monospace,SFMono-Regular,Menlo,monospace', fill:col });
+      tl.textContent = fmtBp(t, step);
+      labels.appendChild(tl);
+    });
+  }
+
+  // Strand chevrons are spaced in PIXELS along the visible part of the intron
+  // line, so they have to be regenerated rather than transformed.
+  function rebuildChevrons(svg, start, end, pxOf){
+    var under = svg.querySelector('.sashimi-underlay');
+    if (!under) return;
+    Array.prototype.forEach.call(under.querySelectorAll('.sashimi-chevron'), function(n){ n.remove(); });
+    if (!svg.dataset.geneStart) return;
+    var gs = num(svg,'geneStart'), ge = num(svg,'geneEnd');
+    var yMid = num(svg,'geneY'), dir = num(svg,'geneDir'), col = svg.dataset.geneCol;
+    var x0 = num(svg,'xLeft'), x1 = num(svg,'xRight');
+    var pl = Math.max(x0, pxOf(gs)), pr = Math.min(x1, pxOf(ge));
+    if (pr - pl <= 40) return;
+    for (var cx = pl + 26; cx <= pr - 14; cx += 46) {
+      under.appendChild(svgEl('path', { 'class':'sashimi-chevron', fill:'none', stroke:col,
+        'stroke-width':'1.4',
+        d:'M ' + (cx - 4*dir) + ',' + (yMid - 4) + ' L ' + (cx + 4*dir) + ',' + yMid +
+          ' L ' + (cx - 4*dir) + ',' + (yMid + 4) }));
     }
   }
-  function currentView(svg){ return { start: Number(svg.dataset.viewStart), end: Number(svg.dataset.viewEnd) }; }
+
+  // The whole of panning and zooming, in one function.
+  //
+  // opts.silent suppresses the settle ping. Used on the very first apply after
+  // a fresh figure arrives: the server has just computed the tables for exactly
+  // this window, so asking it to recompute them would be a pointless round trip.
+  function applyView(svg, start, end, opts){
+    var r = renderWin(svg);
+    var span = Math.max(MIN_ZOOM_BP, end - start);
+    // never show a window we have no data for
+    if (span > r.end - r.start) { span = r.end - r.start; start = r.start; }
+    else {
+      if (start < r.start) start = r.start;
+      if (start + span > r.end) start = r.end - span;
+    }
+    end = start + span;
+
+    var origin = num(svg,'origin'), x0 = num(svg,'xLeft');
+    var sx = scaleFor(svg, start, end);
+    var tx = x0 - (start - origin) * sx;
+    geomG(svg).setAttribute('transform', 'translate(' + tx.toFixed(6) + ',0) scale(' + sx.toFixed(10) + ',1)');
+    svg.dataset.viewStart = Math.round(start);
+    svg.dataset.viewEnd = Math.round(end);
+
+    var x1 = num(svg,'xRight');
+    var pxOf = function(bp){ return x0 + (bp - start) * sx; };
+    Array.prototype.forEach.call(svg.querySelectorAll('.sashimi-lbl[data-bp]'), function(t){
+      if (t.classList.contains('sashimi-ticklabel')) return;   // rebuilt below
+      var x = pxOf(Number(t.dataset.bp)) + (Number(t.dataset.dx) || 0);
+      if (t.dataset.clamp === 'start') x = Math.max(x0, Math.min(x, x1 - 40));
+      else if (t.dataset.clamp === 'end') x = Math.min(x1, Math.max(x, x0 + 40));
+      t.setAttribute('x', x.toFixed(1));
+      if (!t.dataset.clamp) t.style.display = (x < x0 - 60 || x > x1 + 60) ? 'none' : '';
+    });
+    rebuildAxis(svg, start, end, pxOf);
+    rebuildChevrons(svg, start, end, pxOf);
+    updateLocusReadout(svg, start, end);
+    scheduleTileCheck(svg);
+    if (!(opts && opts.silent)) scheduleSettle(svg);
+  }
+
+  // A fresh figure is rendered by R over the whole BUFFER, with the window the
+  // user actually asked for carried in data-view-*. Zooming from one to the
+  // other is what puts the requested locus on screen; without it you would see
+  // the buffer, which is 3x too wide and not what was asked for.
+  function initView(svg){
+    if (!svg || svg.dataset.viewInit === '1') return;
+    svg.dataset.viewInit = '1';
+    applyView(svg, num(svg,'viewStart'), num(svg,'viewEnd'), { silent: true });
+  }
+
+  function updateLocusReadout(svg, start, end){
+    var el = document.getElementById('sashimi_locus_readout');
+    if (!el) return;
+    var chrom = el.dataset.chrom || '';
+    el.textContent = chrom + ':' + Math.round(start).toLocaleString() + '-' +
+                     Math.round(end).toLocaleString() +
+                     '  (' + ((end - start) / 1000).toFixed(1) + ' kb)';
+  }
+
+  function panBy(svg, dBp){ var v = currentView(svg); applyView(svg, v.start + dBp, v.end + dBp); }
+  function zoomAt(svg, bp, factor){
+    var v = currentView(svg), span = (v.end - v.start) * factor;
+    var frac = (bp - v.start) / Math.max(1, v.end - v.start);
+    applyView(svg, bp - frac * span, bp + (1 - frac) * span);
+  }
   function zoomBy(svg, factor){
-    var v = currentView(svg), mid = (v.start + v.end) / 2, w = (v.end - v.start) * factor;
-    sendZoom(mid - w / 2, mid + w / 2);
-  }
-  // invert a click's screen X back to a bp coordinate, using the SVG's own
-  // coordinate-transform matrix rather than duplicating .x_of_bp()'s math in
-  // JS -- correct regardless of compact/expanded scale or container scroll.
-  function bpAtClientX(svg, clientX){
-    var pt = svg.createSVGPoint(); pt.x = clientX; pt.y = 0;
-    var loc = pt.matrixTransform(svg.getScreenCTM().inverse());
-    var xLeft = Number(svg.dataset.xLeft), xRight = Number(svg.dataset.xRight);
     var v = currentView(svg);
-    var frac = (loc.x - xLeft) / (xRight - xLeft);
-    return v.start + frac * (v.end - v.start);
+    zoomAt(svg, (v.start + v.end) / 2, factor);
   }
+
+  // invert a click's screen X back to a bp coordinate using the geometry
+  // group's own transform matrix, rather than duplicating the mapping in JS --
+  // correct regardless of compact/expanded scale, container scroll, or zoom.
+  function bpAtClientX(svg, clientX){
+    var g = geomG(svg); if (!g) return currentView(svg).start;
+    var pt = svg.createSVGPoint(); pt.x = clientX; pt.y = 0;
+    var loc = pt.matrixTransform(g.getScreenCTM().inverse());
+    return loc.x + num(svg,'origin');
+  }
+
+  // ----------------------------------------------------------------------
+  // TILES -- the only thing that goes back to the server.
+  //
+  // Requested on APPROACH, not arrival: when the view gets within 25% of a
+  // render-window edge, or when the view is zoomed in far enough that the
+  // rendered bins are coarser than the pixels showing them (the honest
+  // equivalent of a density-threshold crossing -- at that point the picture
+  // is no longer at full resolution and only a re-read can fix it).
+  //
+  // Every request carries a token. The server echoes it back with the tile,
+  // and a tile whose token is not the newest is dropped on arrival without
+  // rendering and without an error -- see the message handler below.
+  // ----------------------------------------------------------------------
+  var tileToken = 0, tileTimer = null, tilePending = null;
+  function needsTile(svg){
+    var v = currentView(svg), r = renderWin(svg);
+    var span = v.end - v.start, margin = span * 0.25;
+    if (v.start - r.start < margin && r.start > 1) return true;
+    if (r.end - v.end < margin) return true;
+    // Under-resolved: one coverage bin now covers more than ~2 drawing units,
+    // i.e. the wiggle has visibly become a staircase and is no longer showing
+    // the depth it claims to. Only a re-read at finer bins fixes that -- the
+    // client must never smooth it, because an interpolated coverage track is an
+    // invented measurement. 2x rather than 1x so a figure sitting exactly at
+    // its native resolution doesn't request a tile it doesn't need.
+    var binBp = num(svg,'binBp');
+    var bpPerUnit = span / Math.max(1, num(svg,'xRight') - num(svg,'xLeft'));
+    return binBp > bpPerUnit * 2;
+  }
+  function scheduleTileCheck(svg){
+    if (!window.Shiny || !Shiny.setInputValue) return;
+    if (!needsTile(svg)) return;
+    if (tileTimer) clearTimeout(tileTimer);
+    // only the newest request survives; an in-flight one is superseded rather
+    // than queued, so a fast drag across a gene issues one tile, not thirty
+    tileTimer = setTimeout(function(){
+      var v = currentView(svg);
+      tileToken += 1;
+      tilePending = tileToken;
+      var box = figBox(); if (box) box.classList.add('l2b-sashimi-loading');
+      Shiny.setInputValue('cryptic_tile_request',
+        { start: Math.round(v.start), end: Math.round(v.end), token: tileToken },
+        { priority: 'event' });
+    }, 120);
+  }
+
+  // On settle, ask the server to recompute the RESULT TABLES for the window
+  // now on screen. Pure arithmetic over the cached tile -- no BAM read, no
+  // network -- so the counts under the plot keep meaning what is in view.
+  var settleTimer = null;
+  function scheduleSettle(svg){
+    if (!window.Shiny || !Shiny.setInputValue) return;
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(function(){
+      var v = currentView(svg);
+      Shiny.setInputValue('cryptic_view_settled',
+        { start: Math.round(v.start), end: Math.round(v.end), token: tileToken },
+        { priority: 'event' });
+    }, 250);
+  }
+
+  // A tile arrives as replacement markup for the three layers plus fresh root
+  // data-*. It is swapped in place rather than re-rendered through Shiny, so
+  // the pinned tooltip, the filter slider, the drag-resized height and the
+  // scroll position all survive -- and, critically, so the view the user is
+  // looking at does not jump.
+  if (window.Shiny && Shiny.addCustomMessageHandler) {
+    Shiny.addCustomMessageHandler('sashimiTile', function(msg){
+      var svg = figSvg(); if (!svg) return;
+      if (tilePending !== null && msg.token !== tilePending) return;  // stale: drop silently
+      tilePending = null;
+      var box = figBox(); if (box) box.classList.remove('l2b-sashimi-loading');
+      var keep = currentView(svg);
+      var holder = document.createElement('div');
+      holder.innerHTML = msg.svg;
+      var fresh = holder.querySelector('svg');
+      if (!fresh) return;
+      svg.parentNode.replaceChild(fresh, svg);
+      fresh.dataset.viewInit = '1';
+      applyView(fresh, keep.start, keep.end, { silent: true });
+      restoreFilterControls(); applyFilter(); applyPreserveAspectRatio();
+    });
+  }
+
+  function requestTile(start, end){
+    if (!window.Shiny || !Shiny.setInputValue) return;
+    tileToken += 1; tilePending = tileToken;
+    var box = figBox(); if (box) box.classList.add('l2b-sashimi-loading');
+    Shiny.setInputValue('cryptic_tile_request',
+      { start: Math.round(start), end: Math.round(end), token: tileToken },
+      { priority: 'event' });
+  }
+  function resetView(svg){
+    var os = num(svg,'origStart'), oe = num(svg,'origEnd'), r = renderWin(svg);
+    if (os >= r.start && oe <= r.end) applyView(svg, os, oe); else requestTile(os, oe);
+  }
+
+  // Drag to pan the GENOME (this used to scroll the container). dBp is derived
+  // from the drag's total offset against the view at mousedown rather than
+  // accumulated per move, so a long drag can't drift. A plain click is left
+  // alone so pinning a tooltip still works; a real drag swallows the click that
+  // follows mouseup so it doesn't also pin/unpin underneath.
+  document.addEventListener('mousedown', function(e){
+    var box = e.target.closest ? e.target.closest('.l2b-sashimi') : null;
+    if (!box || e.button !== 0) return;
+    if (e.target.closest('.l2b-sashimi-resize-handle')) return;
+    var svg = box.querySelector('svg'); if (!svg) return;
+    var v0 = currentView(svg), sx = scaleFor(svg, v0.start, v0.end);
+    var ctm = svg.getScreenCTM();
+    var unitsPerPx = (ctm && ctm.a) ? 1 / ctm.a : 1;
+    var startX = e.pageX, dragged = false;
+    function onMove(e2){
+      var dx = e2.pageX - startX;
+      if (!dragged && Math.abs(dx) > 4) { dragged = true; box.classList.add('l2b-sashimi-dragging'); }
+      if (!dragged) return;
+      e2.preventDefault();
+      var dBp = -(dx * unitsPerPx) / sx;
+      applyView(svg, v0.start + dBp, v0.end + dBp);
+    }
+    function onUp(){
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      box.classList.remove('l2b-sashimi-dragging');
+      if (dragged) {
+        var swallow = function(ce){ ce.stopPropagation(); ce.preventDefault(); };
+        document.addEventListener('click', swallow, { capture: true, once: true });
+      }
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // ctrl/cmd + wheel zooms at the cursor. Deliberately NOT plain wheel: this
+  // figure is embedded in a scrolling page, and swallowing the page scroll
+  // whenever the pointer happens to cross the plot is worse than one modifier.
+  document.addEventListener('wheel', function(e){
+    var box = e.target.closest ? e.target.closest('.l2b-sashimi') : null;
+    if (!box || !(e.ctrlKey || e.metaKey)) return;
+    var svg = box.querySelector('svg'); if (!svg) return;
+    e.preventDefault();
+    zoomAt(svg, bpAtClientX(svg, e.clientX), e.deltaY > 0 ? 1.18 : 1 / 1.18);
+  }, { passive: false });
 
   document.addEventListener('dblclick', function(e){
     var box = e.target.closest ? e.target.closest('.l2b-sashimi') : null;
     if (!box) return;
     var svg = box.querySelector('svg'); if (!svg) return;
     e.preventDefault();
-    var bp = bpAtClientX(svg, e.clientX);
-    var v = currentView(svg), w = (v.end - v.start) / 3;
-    sendZoom(bp - w / 2, bp + w / 2);
+    zoomAt(svg, bpAtClientX(svg, e.clientX), 1 / 3);
+  });
+
+  // keyboard navigation, for the same reason the junctions/exons are
+  // tabindex-able: this has to be usable without a mouse
+  document.addEventListener('keydown', function(e){
+    var box = figBox(); if (!box) return;
+    if (!box.contains(document.activeElement) && document.activeElement !== document.body) return;
+    var svg = box.querySelector('svg'); if (!svg) return;
+    var v = currentView(svg), span = v.end - v.start;
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); panBy(svg, -span * 0.15); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); panBy(svg,  span * 0.15); }
+    else if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomBy(svg, 1 / 1.5); }
+    else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(svg, 1.5); }
+    else if (e.key === '0') { e.preventDefault(); resetView(svg); }
   });
 
   document.addEventListener('click', function(e){
@@ -824,18 +1124,18 @@ SASHIMI_JS <- "
     }
     var ziBtn = e.target.closest ? e.target.closest('.sashimi-zoom-in') : null;
     if (ziBtn) {
-      var svgZi = document.querySelector('.l2b-sashimi svg');
+      var svgZi = figSvg();
       if (svgZi) zoomBy(svgZi, 1 / 3); return;
     }
     var zoBtn = e.target.closest ? e.target.closest('.sashimi-zoom-out') : null;
     if (zoBtn) {
-      var svgZo = document.querySelector('.l2b-sashimi svg');
+      var svgZo = figSvg();
       if (svgZo) zoomBy(svgZo, 3); return;
     }
     var zrBtn = e.target.closest ? e.target.closest('.sashimi-zoom-reset') : null;
     if (zrBtn) {
-      var svgZr = document.querySelector('.l2b-sashimi svg');
-      if (svgZr) sendZoom(Number(svgZr.dataset.origStart), Number(svgZr.dataset.origEnd));
+      var svgZr = figSvg();
+      if (svgZr) resetView(svgZr);
       return;
     }
     var link = e.target.closest ? e.target.closest('.sashimi-design-link') : null;
@@ -923,10 +1223,18 @@ SASHIMI_JS <- "
     var minReads = Number(slider.value);
     var novelOnly = document.querySelector('.sashimi-filter-novel');
     var onlyNovel = !!(novelOnly && novelOnly.checked);
+    var shown = {};
     document.querySelectorAll('.sashimi-junction').forEach(function(g){
       var show = Number(g.dataset.reads) >= minReads && (!onlyNovel || g.dataset.novel === 'true');
       g.style.opacity = show ? '' : '0.08';
       g.style.pointerEvents = show ? '' : 'none';
+      shown[g.dataset.jkey] = show;
+    });
+    // the arc and its count label are in different layers now (genomic vs
+    // pixel), so filtering has to dim both or a hidden junction keeps a
+    // floating number over the track
+    document.querySelectorAll('.sashimi-jlabel').forEach(function(t){
+      t.style.opacity = shown[t.dataset.jkey] === false ? '0.08' : '';
     });
     var out = document.getElementById('sashimi_filter_val');
     if (out && out.textContent !== slider.value) out.textContent = slider.value;
@@ -998,13 +1306,18 @@ SASHIMI_JS <- "
   var mo = new MutationObserver(function(muts){
     for (var i = 0; i < muts.length; i++) {
       if (muts[i].addedNodes && muts[i].addedNodes.length) {
+        initView(figSvg());
         restoreFilterControls(); applyFilter(); applySashimiHeight(); applyPreserveAspectRatio();
         break;
       }
     }
   });
-  function startObserving(){ mo.observe(document.body, { childList: true, subtree: true }); }
+  function startObserving(){
+    mo.observe(document.body, { childList: true, subtree: true });
+    initView(figSvg());
+  }
   if (document.body) startObserving(); else document.addEventListener('DOMContentLoaded', startObserving);
+  window.addEventListener('load', function(){ initView(figSvg()); });
 })();
 </script>
 "
