@@ -155,4 +155,46 @@ Given a locus and a control + knockdown RNA-seq BAM pair (uploaded from the brow
 - `export_pdf.R`: headless-Chrome print-to-PDF for the figure.
 - `cryptic_interpret.R`: turns a result into a plain-language interpretation via a **local** Ollama model. Deliberately constrained: the computed result is the only ground truth; PubMed abstracts (fetched only for a real gene symbol, never a raw locus) are injected as explicitly-attributed background context the model is told never to assert as fact about the user's sample. `summarize_cryptic_findings()` is the deterministic fact block the prompt is built around — if you change what the detector computes, update this function so the interpreter stays grounded in it.
 
+### The protein layer (`protein_seq.R`, `protein_annot.R`, `protein_consequence.R`)
+Answers the question the RNA-side tools stop short of: once a cryptic exon is
+included, is there still a protein, and what is missing from it? Three files, split
+on one line that matters.
+
+**`protein_seq.R` is pure and network-free, and must stay that way** — it is the
+file every other protein tool will source. Standard genetic code (NCBI table 1
+only; mitochondrial/alternative codes are *not* handled), `translate_dna()`,
+six-frame `find_orfs()`, `splice_transcript()`, `predict_nmd()` (the 55-nt rule),
+`protein_diff()`, `domains_affected()`. The codon table is generated from the
+published NCBI amino-acid string rather than typed out as 64 entries — one
+transcription of one constant instead of 64 chances to typo.
+
+**Do not loosen `.clean_seq()` in `protein_params.R`.** It hard-errors on any
+letter outside the 20 standard residues, and `a280`/`pp` depend on that: it is
+what stops someone quantifying a typo. A *translation* legitimately produces `*`
+and `X`, so `protein_seq.R` carries its own `.clean_seq_permissive()`, and
+`strip_stops()` is the bridge to `protein_parameters()`.
+
+**`protein_annot.R` needs no JSON parser, deliberately.** UniProt serves
+`format=tsv` and `format=fasta`, so parsing is `strsplit` on tabs — the same
+no-JSON-dependency rule `fetch_genomic()` follows, but without even the regex.
+Domain coordinates come from the `ft_domain` feature string. Disk cache under
+`l2b_data_dir()/protein-cache`, successes only, TTL constant, exactly like
+`update_check.R`.
+
+**Never construct an AlphaFold model URL.** The documented `..._v4.pdb` form
+already 404s (the database is on v6 and will move again) — `alphafold_model()`
+reads `pdbUrl` out of the API reply. Note also that `url()`/`readLines()` reports
+HTTP status in a *warning* and then fails with a generic "cannot open the
+connection" error, so distinguishing "no model for this protein" from "database
+unreachable" means catching the 404 on the warning side.
+
+**`protein_consequence.R` is the orchestrator** and the only one of the three that
+touches the network for its own logic: locus → UCSC transcripts → one genomic
+fetch for the whole span (sliced locally, so a 44-exon gene is one request, not
+44) → splice with and without the cryptic exon → translate from the annotated
+start codon → NMD → UniProt domains. UniProt failure is soft: the analysis is
+complete and correct without it. Verified end to end against UniProt for STMN2,
+TP53, UNC13A, SOD1 and BRCA1 — both strands, 5 to 44 exons, translations identical
+to the reference.
+
 Known non-bug to be aware of when testing: `GenomicAlignments::coverage()`'s `width=` argument, if named, must name every seqlevel in the alignment object (every contig in the BAM header), not just the chromosome of interest — `coverage_bins()` works around this by computing unwindowed coverage and padding/cropping the one chromosome's `Rle` by hand.
