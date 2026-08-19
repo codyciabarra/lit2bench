@@ -234,6 +234,11 @@ server_cryptic <- function(input, output, session, ctx) {
       figstate$result <- out$figure
       figstate$view <- list(start = vs, end = ve)
       cryptic_res(out$view)
+      # An interpretation is written about ONE window. The moment the view
+      # moves it is describing something that is no longer on screen, so it
+      # goes -- the model is on a leash precisely so it can never appear to
+      # assert something about data the user is not looking at.
+      cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
       session$sendCustomMessage("sashimiTile", list(
         token = tgt$token,
         svg = sashimi_svg(out$figure, dark = dark_mode())))
@@ -258,6 +263,11 @@ server_cryptic <- function(input, output, session, ctx) {
       res$tile_start <- figstate$bundle$start; res$tile_end <- figstate$bundle$end
       figstate$view <- list(start = vs, end = ve)
       cryptic_res(res)
+      # An interpretation is written about ONE window. The moment the view
+      # moves it is describing something that is no longer on screen, so it
+      # goes -- the model is on a leash precisely so it can never appear to
+      # assert something about data the user is not looking at.
+      cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
     }, error = function(e) cryptic_err(conditionMessage(e)))
   })
 
