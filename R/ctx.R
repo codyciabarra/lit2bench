@@ -11,7 +11,7 @@
 # So the coupling is now explicit and lives here. One environment, built once per
 # session, passed to every server_<id>(). Three kinds of thing in it:
 #
-#   1. Genuinely global session state (dark_mode, nav).
+#   1. Genuinely global session state (dark_mode).
 #   2. Named handoff channels between two specific tools (shared_selected_tx,
 #      pcr_provenance, qpcr_provenance). These are shared because a *workflow*
 #      spans two tools, not because of where the code happened to sit. Each is
@@ -56,11 +56,6 @@ l2b_new_ctx <- function(input, output, session) {
   ctx$dark_mode <- reactive({
     if (is.null(input$theme_mode)) TRUE else identical(input$theme_mode, "dark")
   })
-
-  # Switch tools. Every "jump to that tool" button in the app goes through here
-  # rather than calling updateTabsetPanel() with a literal id, so the tab id and
-  # the TOOLS id can never drift apart.
-  ctx$nav <- function(id) updateTabsetPanel(session, "tool_tabs", selected = id)
 
   # -- handoff channels ------------------------------------------------------
   # Explorer writes, Extractor and Design read: the transcript the user picked,

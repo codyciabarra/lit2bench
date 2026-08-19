@@ -73,5 +73,5 @@ server_sc <- function(input, output, session, ctx) {
 
   ctx$publish("sc", res = sc_res, err = sc_err,
     aside = function() status_row(sc_res(), sc_err(), function(r)
-      sprintf("Curve fit, R\U00b2 = %.3f", r$r_squared)))
+      sprintf("Curve fit, R² = %.3f", r$r_squared)))
 }

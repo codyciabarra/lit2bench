@@ -1,0 +1,459 @@
+# cryptic.R -- Cryptic Splicing Engine: the IGV-style sashimi viewer.
+#
+# The pipeline itself is in cryptic_exon_bam.R; this file is the panel and the
+# wiring. Three things here are load-bearing and easy to break:
+#
+#   The expensive/cheap split. Reads + annotation depend only on (files, locus)
+#   and are memoized per session by the cache created here (cryptic_cache);
+#   detection and differential splicing are pure arithmetic over the thresholds.
+#   That's what makes re-running after a threshold tweak instant instead of
+#   re-reading multi-GB BAMs. Anything threshold-dependent must stay out of the
+#   cached half.
+#
+#   Zoom re-runs detection, not resolution. cryptic_bam_info holds the resolved
+#   BAM paths from the initial run, so the zoom observer calls
+#   run_cryptic_detection() again at the new window against the same files and
+#   the same cache -- no re-resolving, no re-materializing uploads.
+#   result$orig_start/orig_end is what "Reset view" returns to, carried forward
+#   unchanged through every zoom step rather than recomputed from the current view.
+#
+#   This tool runs full-width. It publishes aside_none = TRUE, and CSS scoped to
+#   body[data-tool='cryptic'] drops the right rail -- its status lives in the
+#   hero stats instead. The layout switch is driven by the data-tool attribute
+#   app.R pushes to the client, not by ad hoc CSS.
+#
+# The interpretation panel is the one deliberately non-deterministic piece in the
+# app, and it stays on a short leash: the computed result is the only ground
+# truth, PubMed abstracts are injected as explicitly-attributed background the
+# model is told never to assert as fact about the user's sample, and the whole
+# thing is optional and local (Ollama). See cryptic_interpret.R.
+#
+# The three "design primers for this" entry points at the top of the server
+# function call ctx$design_handoff(), which design.R owns -- including the one
+# fired from a pinned tooltip on the plot itself (SASHIMI_JS's click delegate on
+# .sashimi-design-link), which skips the DT row selection entirely.
+
+panel_cryptic <- function() {
+  layout_columns(col_widths = c(4, 8),
+    div(
+      l2b_card(1, "Locus", "A literal locus is reliable; a gene symbol is a best-effort UCSC lookup.",
+        textInput("cryptic_locus", "Locus or gene symbol", value = "UNC13A"),
+        selectInput("cryptic_assembly", "Assembly", choices = c("hg38", "hg19"), selected = "hg38")),
+      l2b_card(2, "BAM source", "Lit2Bench runs on the same machine as your data, so pointing at BAMs already on disk skips the browser upload and the copy entirely -- near-instant even for multi-GB files. Upload is still there for files that aren't local.",
+        radioButtons("cryptic_bam_source", NULL,
+                      choices = c("Local file path (fastest)" = "path", "Upload through browser" = "upload"),
+                      selected = "path")),
+      conditionalPanel("input.cryptic_bam_source == 'path'",
+        l2b_card(3, "Control BAM path(s)", "One path per line, or comma-separated. Globs (/data/ctrl_*.bam) and ~ work. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
+          textAreaInput("cryptic_control_paths", NULL, rows = 2, resize = "vertical",
+                        placeholder = "/path/to/SCR_DMSO.bam")),
+        l2b_card(4, "Knockdown BAM path(s)", "Same as above, for the TDP-43 (or other) knockdown/knockout sample.",
+          textAreaInput("cryptic_kd_paths", NULL, rows = 2, resize = "vertical",
+                        placeholder = "/path/to/TDP43KD_11j.bam")),
+        checkboxInput("cryptic_force_reindex",
+                      "Force re-index BAMs (ignore any existing .bai, rebuild from the file's current bytes -- slower, but a hard guarantee instead of a freshness check)",
+                      value = FALSE)),
+      conditionalPanel("input.cryptic_bam_source == 'upload'",
+        l2b_card(3, "Control BAM", "Select one or more replicate .bam files (and their .bai's, if you have them) together. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
+          fileInput("cryptic_control_files", NULL, multiple = TRUE, accept = c(".bam", ".bai"))),
+        l2b_card(4, "Knockdown BAM", "Same as above, for the TDP-43 (or other) knockdown/knockout sample -- one or more replicates.",
+          fileInput("cryptic_kd_files", NULL, multiple = TRUE, accept = c(".bam", ".bai")))),
+      l2b_card(5, "Detection thresholds", "A knockdown junction counts as novel below max control reads and absent from RefSeq. Re-running after changing only these is near-instant -- the BAM reads and annotation are cached per session, and only the thresholds are recomputed.",
+        fluidRow(column(6, numericInput("cryptic_min_kd_reads", "Min KD reads", value = 3, min = 1)),
+                 column(6, numericInput("cryptic_max_ctrl_reads", "Max control reads", value = 1, min = 0))),
+        fluidRow(column(6, numericInput("cryptic_exon_min", "Min candidate exon (bp)", value = 20, min = 1)),
+                 column(6, numericInput("cryptic_exon_max", "Max candidate exon (bp)", value = 400, min = 1))),
+        br(),
+        actionButton("cryptic_go", "Run detection", class = "btn-run"))
+    ),
+    div(uiOutput("cryptic_out"))
+  )
+}
+
+server_cryptic <- function(input, output, session, ctx) {
+  dark_mode <- ctx$dark_mode
+  run_design_handoff <- function(...) ctx$design_handoff(...)   # owned by design.R
+
+  # ---- CRYPTIC EXON ENGINE ----
+  cryptic_res <- reactiveVal(NULL); cryptic_err <- reactiveVal(NULL)
+  cryptic_interp <- reactiveVal(NULL); cryptic_interp_err <- reactiveVal(NULL)
+  cryptic_interp_busy <- reactiveVal(FALSE); cryptic_history <- reactiveVal(character(0))
+  # per-session (not global) so concurrent sessions can't serve each other's
+  # tracks, and everything is released when the session ends
+  cryptic_cache <- new_bam_cache()
+  # set once a run succeeds; lets zoom (below) re-run run_cryptic_detection()
+  # at a new window without re-resolving or re-materializing the BAMs
+  cryptic_bam_info <- reactiveVal(NULL)
+
+  cryptic_resolve_bams <- function(label) {
+    workdir <- file.path(tempdir(), paste0("cryptic_", session$token))
+    if (identical(input$cryptic_bam_source, "path")) {
+      res <- resolve_local_bams(if (identical(label, "control")) input$cryptic_control_paths
+                          else input$cryptic_kd_paths, label,
+                          force_reindex = isTRUE(input$cryptic_force_reindex))
+      # counts and sizes only -- never the paths, which name samples and patients
+      l2b_log("upload", tool = "cryptic", mode = "local_path", arm = label,
+              n_files = length(res$paths),
+              mb = round(sum(file.size(res$paths), na.rm = TRUE) / 1048576, 1))
+      res
+    } else {
+      up <- if (identical(label, "control")) input$cryptic_control_files else input$cryptic_kd_files
+      res <- materialize_bam_uploads(up, label, workdir)
+      l2b_log("upload", tool = "cryptic", mode = "browser_upload", arm = label,
+              n_files = if (is.null(up)) 0L else nrow(up),
+              mb = if (is.null(up)) 0 else round(sum(up$size, na.rm = TRUE) / 1048576, 1))
+      res
+    }
+  }
+
+  observeEvent(input$cryptic_go, {
+    l2b_log("run", tool = "cryptic")
+    cryptic_err(NULL); cryptic_res(NULL)
+    t0 <- Sys.time()
+    withProgress(message = "Scanning for cryptic exons...", value = 0.05, {
+      tryCatch({
+        incProgress(0.1, detail = "resolving locus")
+        locus <- parse_locus_input(input$cryptic_locus, assembly = input$cryptic_assembly)
+
+        incProgress(0.2, detail = "reading control BAM(s)")
+        control_bams <- cryptic_resolve_bams("control")
+        incProgress(0.3, detail = "reading knockdown BAM(s)")
+        kd_bams <- cryptic_resolve_bams("knockdown")
+
+        thresholds <- list(min_kd_reads = input$cryptic_min_kd_reads,
+                           max_control_reads = input$cryptic_max_ctrl_reads,
+                           exon_min = input$cryptic_exon_min, exon_max = input$cryptic_exon_max)
+        incProgress(0.3, detail = "detecting + building figure")
+        res <- run_cryptic_detection(locus, control_bams, kd_bams, input$cryptic_assembly,
+                                     thresholds, cryptic_cache)
+        # the "full view" a double-click zoom / reset can always get back to
+        res$orig_start <- locus$start; res$orig_end <- locus$end
+
+        cryptic_bam_info(list(control = control_bams, kd = kd_bams, assembly = input$cryptic_assembly))
+        cryptic_res(res)
+        cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
+
+        # What the run *was* and what it found. The locus width goes in but the
+        # coordinates don't: window size is what explains a slow run, whereas
+        # chr9:27,543,000-27,545,000 identifies the experiment.
+        l2b_log("analysis", tool = "cryptic", assembly = input$cryptic_assembly,
+                width_kb = round((locus$end - locus$start) / 1000, 1),
+                n_control = length(control_bams$paths), n_kd = length(kd_bams$paths),
+                novel_junctions = NROW(res$candidates$novel_junctions),
+                candidate_exons = NROW(res$candidates$candidate_exons),
+                secs = round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1))
+      }, error = function(e) {
+        l2b_log("analysis_failed", tool = "cryptic",
+                secs = round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1))
+        cryptic_err(conditionMessage(e))
+      })
+    })
+  })
+
+  # -- IGV-style zoom: double-click a point in the plot, or the zoom
+  # in/out/reset buttons (all client-side, SASHIMI_JS) -- to re-run detection
+  # at a new window. No withProgress here: unlike the initial run, this reads
+  # an already-resolved, already-indexed BAM over what's usually a *narrower*
+  # window, through the same cache, so it's fast enough that Shiny's default
+  # "recalculating" dimming on uiOutput is feedback enough.
+  observeEvent(input$cryptic_zoom_to, {
+    req(cryptic_res(), cryptic_bam_info())
+    prev <- cryptic_res(); bams <- cryptic_bam_info()
+    tgt <- input$cryptic_zoom_to
+    new_start <- max(1, round(as.numeric(tgt$start)))
+    new_end <- max(new_start + 1, round(as.numeric(tgt$end)))
+    locus <- list(chrom = prev$chrom, start = new_start, end = new_end, label = prev$label)
+    tryCatch({
+      res <- run_cryptic_detection(locus, bams$control, bams$kd, bams$assembly, prev$thresholds, cryptic_cache)
+      res$orig_start <- prev$orig_start %||% prev$start
+      res$orig_end <- prev$orig_end %||% prev$end
+      cryptic_res(res)
+      cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
+    }, error = function(e) cryptic_err(conditionMessage(e)))
+  })
+
+  output$cryptic_out <- renderUI({
+    if (!is.null(cryptic_err())) return(div(class = "l2b-card", l2b_err(cryptic_err())))
+    if (is.null(cryptic_res())) return(div(class = "l2b-card",
+      l2b_empty("\U0001f52c", "No scan yet", "Enter a locus, upload both BAMs, and click Run detection.")))
+    r <- cryptic_res()
+    n_nj <- nrow(r$candidates$novel_junctions); n_ce <- nrow(r$candidates$candidate_exons)
+    n_ri <- nrow(r$retained_introns)
+    gene_lbl <- if (!is.null(r$transcript)) r$transcript$name[1] else "—"
+    max_j_reads <- max(1, r$control$junctions$reads, r$knockdown$junctions$reads)
+    tagList(
+      div(class = "l2b-card",
+        l2b_hero(
+          l2b_stat("Region", r$label, sprintf("%s · %.1f kb", r$chrom, (r$end - r$start) / 1000)),
+          l2b_stat("Transcript", gene_lbl, if (r$n_other_isoforms > 0) sprintf("+%d more isoforms", r$n_other_isoforms) else "single isoform"),
+          l2b_stat("Novel junctions", n_nj, "in KD, not annotated", if (n_nj > 0) "accent" else ""),
+          l2b_stat("Candidate exons", n_ce, "paired novel junctions", if (n_ce > 0) "bad" else "good")
+        ),
+        div(style = "display:flex; flex-direction:column; gap:10px; margin-bottom:10px; padding:12px 14px; background:var(--l2b-surface-2); border:1px solid var(--l2b-border); border-radius:10px;",
+            div(style = "display:flex; gap:24px; align-items:center; flex-wrap:wrap;",
+                div(style = "flex:1 1 240px;",
+                    tags$label(style = "font-size:12.5px; color:var(--l2b-text-muted); display:block; margin-bottom:4px;",
+                               "Min. junction reads: ", tags$span(id = "sashimi_filter_val", "1")),
+                    tags$input(type = "range", class = "sashimi-filter-reads", min = "1",
+                               max = as.character(max_j_reads), value = "1", step = "1",
+                               style = "width:100%; accent-color:var(--l2b-accent);")),
+                tags$label(style = "display:flex; align-items:center; gap:7px; font-size:13px; color:var(--l2b-text-muted); cursor:pointer; user-select:none; flex:none;",
+                           tags$input(type = "checkbox", class = "sashimi-filter-novel"), "Novel junctions only")),
+            div(style = "display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding-top:2px; border-top:1px solid var(--l2b-border);",
+                div(class = "l2b-sashimi-toolbar",
+                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-in", title = "Zoom in (or double-click the plot)", "🔍+"),
+                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-out", title = "Zoom out", "🔍−"),
+                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-reset", title = "Reset to the full requested region", "⟲"),
+                    div(class = "l2b-sashimi-toolbar-sep"),
+                    tags$button(type = "button", class = "sashimi-expand-toggle", "⤢ Expand view"),
+                    tags$button(type = "button", class = "sashimi-fullscreen-toggle", "⛶ Full screen")),
+                div(style = "font-size:11.5px; color:var(--l2b-text-faint); flex:1 1 auto;",
+                    "Hover a feature for detail · click to pin · double-click the plot to zoom in · both filters apply instantly"))),
+        div(class = "l2b-sashimi", HTML(sashimi_svg(r, dark = dark_mode()))),
+        div(class = "l2b-sashimi-resize-handle", title = "Drag to resize", div(class = "l2b-grip")),
+        div(class = "l2b-fig-cap",
+            "Coverage wiggles (control blue, knockdown orange) share one depth scale; arcs are splice junctions, thickness and height scaled by supporting reads and labelled with the count. Novel junctions are drawn in red. Drag the figure to scroll if the region is wide, or drag the handle below it to resize."),
+        br(),
+        div(style = "display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px;",
+            downloadButton("cryptic_download_pdf", "Download PDF figure", class = "btn-dl"),
+            downloadButton("cryptic_download_html", "Download HTML figure", class = "btn-dl"),
+            downloadButton("cryptic_download_csv", "Download candidates (CSV)", class = "btn-dl")),
+        tabsetPanel(id = "cryptic_result_tabs", type = "tabs",
+          tabPanel(sprintf("Novel junctions (%d)", n_nj),
+            br(),
+            # value seeded from the current input rather than a hardcoded FALSE:
+            # this whole card (output$cryptic_out) is one renderUI that rebuilds
+            # on every "Run detection" AND every zoom step, which would otherwise
+            # silently reset this checkbox (and the filter it drives) each time --
+            # isolate() reads the live value without making this renderUI block
+            # re-run every time the checkbox itself changes.
+            checkboxInput("cryptic_single_pair_only",
+                          "Localized to one exon pair only (hide junctions that skip a whole annotated exon)",
+                          value = isolate(input$cryptic_single_pair_only) %||% FALSE),
+            DTOutput("cryptic_junc_tbl"),
+            p(class = "l2b-card-sub", "Select a junction row above, then jump straight to the Primer Designer — no manual coordinate entry."),
+            actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;")
+          ),
+          tabPanel(sprintf("Candidate exons (%d)", n_ce),
+            br(),
+            DTOutput("cryptic_exon_tbl"),
+            p(class = "l2b-card-sub", "Select a span row above, then jump straight to the Primer Designer — no manual coordinate entry."),
+            actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;")
+          ),
+          tabPanel(sprintf("Retained introns (%d)", n_ri),
+            br(),
+            p(class = "l2b-card-sub",
+              "Elevated intronic coverage in knockdown, found by scanning each intron at base resolution -- this catches BOTH a fully retained intron (reads pile up across the whole thing instead of being spliced out) AND a cryptic exon buried deep inside a large intron whose own splice junctions are too weak to call (a localized coverage bump the junction tabs can't see). Each row's coordinates are the localized elevated segment. Scored by the intron-retention ratio (segment coverage relative to the gene's exonic level), so it's independent of sequencing depth and expression. TDP-43 loss causes widespread intron retention, so seeing several here is expected -- not necessarily each its own distinct event."),
+            DTOutput("cryptic_retention_tbl"),
+            div(style = "margin-top:10px;", downloadButton("cryptic_download_retention_csv", "Download retained introns (CSV)", class = "btn-dl"))
+          ),
+          tabPanel(sprintf("Differential splicing (%d)", nrow(r$differential)),
+            br(),
+            p(class = "l2b-card-sub",
+              sprintf(paste0("%d control / %d knockdown replicate(s). PSI = junction reads ÷ reads across all ",
+                             "junctions sharing its donor or acceptor site (an intron cluster); p-values are a ",
+                             "per-junction Fisher's exact test on that 2×2 table, FDR-adjusted (q). This is a ",
+                             "lighter-weight V1 -- a real replicate-variance model (as LeafCutter uses) is future work."),
+                      r$control$n_replicates %||% 1L, r$knockdown$n_replicates %||% 1L)),
+            DTOutput("cryptic_diff_tbl"),
+            div(style = "margin-top:10px;", downloadButton("cryptic_download_diff_csv", "Download differential splicing (CSV)", class = "btn-dl"))
+          )
+        )
+      ),
+      div(class = "l2b-card",
+        div(class = "l2b-card-title", "\U0001f9e0 Interpret with a local model"),
+        p(class = "l2b-card-sub",
+          "Runs fully on your machine via Ollama (qwen3:8b). Grounded in the numbers above; PubMed context is used only as attributed background. Assistance, not proof — verify candidates by eye and RT-PCR."),
+        uiOutput("cryptic_interp_out")
+      )
+    )
+  })
+
+  # -- interpretation output (button, streamed result, follow-up box) --
+  output$cryptic_interp_out <- renderUI({
+    busy <- cryptic_interp_busy()
+    interp <- cryptic_interp()
+    tagList(
+      if (!is.null(cryptic_interp_err())) l2b_err(cryptic_interp_err()),
+      if (is.null(interp) && !busy)
+        actionButton("cryptic_interpret", "Interpret these results", class = "btn-run", style = "width:auto;"),
+      if (busy) div(class = "l2b-aside-note", "Thinking locally… (first run also loads the model, which can take a moment)"),
+      if (!is.null(interp)) {
+        tagList(
+          div(class = "l2b-llm-answer", HTML(gsub("\n", "<br>", interp$text))),
+          if (!is.null(interp$sources) && nrow(interp$sources) > 0)
+            div(class = "l2b-llm-sources",
+              strong("Literature context used (background only): "),
+              HTML(paste(sprintf('<a href="https://pubmed.ncbi.nlm.nih.gov/%s/" target="_blank">[%d] %s</a>',
+                                 interp$sources$pmid, seq_len(nrow(interp$sources)),
+                                 interp$sources$title), collapse = " &middot; "))),
+          br(),
+          div(style = "display:flex; gap:8px; align-items:flex-start;",
+            div(style = "flex:1;", textInput("cryptic_followup", NULL, placeholder = "Ask a follow-up question about this result…", width = "100%")),
+            actionButton("cryptic_ask", "Ask", class = "btn-alt", style = "width:auto; flex:none;"))
+        )
+      }
+    )
+  })
+  # Shared by the table render and the row-selection handoff below, so a
+  # selected row index always means the same junction in both places --
+  # filtering only the rendered `out` data.frame (not this) would leave the
+  # design-handoff observer indexing into the unfiltered set and silently
+  # handing off the wrong junction's coordinates once the filter is active.
+  cryptic_junc_filtered <- reactive({
+    req(cryptic_res())
+    df <- cryptic_res()$candidates$novel_junctions
+    if (isTRUE(input$cryptic_single_pair_only)) {
+      df <- df[!is.na(df$exons_skipped) & df$exons_skipped == 0, , drop = FALSE]
+    }
+    df
+  })
+  output$cryptic_junc_tbl <- renderDT({
+    df <- cryptic_junc_filtered()
+    if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds/filter.")))
+    out <- data.frame(
+      Junction = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
+      `KD reads` = df$kd_reads, `Control reads` = df$control_reads,
+      Fold = ifelse(is.infinite(df$fold_enrichment), "∞", sprintf("%.1f×", df$fold_enrichment)),
+      Shape = ifelse(df$paired, "Cryptic exon inclusion",
+                     ifelse(df$exitron, "Exitron", "Cryptic splice site selection")),
+      `Exons skipped` = ifelse(is.na(df$exons_skipped), "—", df$exons_skipped),
+      Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  }, server = TRUE)
+  output$cryptic_exon_tbl <- renderDT({
+    req(cryptic_res()); df <- cryptic_res()$candidates$candidate_exons
+    if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
+    out <- data.frame(
+      Span = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
+      `Length (bp)` = df$length, `KD reads` = df$kd_reads, `Control reads` = df$control_reads,
+      Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  }, server = TRUE)
+  output$cryptic_retention_tbl <- renderDT({
+    req(cryptic_res()); df <- cryptic_res()$retained_introns
+    if (is.null(df) || nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
+    out <- data.frame(
+      Intron = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
+      `Length (bp)` = df$length,
+      `Control cov.` = df$control_cov, `KD cov.` = df$kd_cov,
+      Fold = ifelse(is.infinite(df$fold), "∞", sprintf("%.1f×", df$fold)),
+      Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
+    datatable(out, rownames = FALSE, selection = "none", options = list(dom = "t", paging = FALSE, ordering = FALSE))
+  }, server = TRUE)
+  output$cryptic_download_retention_csv <- l2b_dl("cryptic_download_retention_csv",
+    filename = function() sprintf("%s_retained_introns.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) write.csv(cryptic_res()$retained_introns, f, row.names = FALSE))
+  output$cryptic_diff_tbl <- renderDT({
+    req(cryptic_res()); df <- cryptic_res()$differential
+    if (is.null(df) || nrow(df) == 0) return(l2b_result_table(data.frame(Message = "No junctions with enough pooled reads to test.")))
+    l2b_result_table(data.frame(
+      Junction = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
+      `Cluster size` = df$cluster_size,
+      `PSI (control)` = sprintf("%.2f", df$psi_control),
+      `PSI (KD)` = sprintf("%.2f", df$psi_kd),
+      `ΔPSI` = sprintf("%+.2f", df$delta_psi),
+      `p-value` = signif(df$p_value, 3), `q-value` = signif(df$q_value, 3),
+      Novel = ifelse(df$novel, "yes", "no"), check.names = FALSE))
+  }, server = FALSE)
+  output$cryptic_download_pdf <- l2b_dl("cryptic_download_pdf",
+    filename = function() sprintf("%s_cryptic_exon_engine.pdf", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) html_to_pdf(build_sashimi_html(cryptic_res(), dark = FALSE), f))
+  output$cryptic_download_html <- l2b_dl("cryptic_download_html",
+    filename = function() sprintf("%s_cryptic_exon_engine.html", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) writeLines(build_sashimi_html(cryptic_res(), dark = FALSE), f))
+  output$cryptic_download_csv <- l2b_dl("cryptic_download_csv",
+    filename = function() sprintf("%s_candidate_exons.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) write.csv(cryptic_res()$candidates$candidate_exons, f, row.names = FALSE))
+  output$cryptic_download_diff_csv <- l2b_dl("cryptic_download_diff_csv",
+    filename = function() sprintf("%s_differential_splicing.csv", gsub("[^A-Za-z0-9]", "_", cryptic_res()$label)),
+    content = function(f) write.csv(cryptic_res()$differential, f, row.names = FALSE))
+
+  # -- local-model interpretation (Ollama; grounded in the computed result) --
+  .run_cryptic_interp <- function(question = NULL) {
+    cryptic_interp_err(NULL); cryptic_interp_busy(TRUE)
+    on.exit(cryptic_interp_busy(FALSE), add = TRUE)
+    tryCatch({
+      out <- interpret_cryptic_result(cryptic_res(), model = "qwen3:8b",
+                                      question = question, history = cryptic_history())
+      if (!is.null(question)) {
+        cryptic_history(c(cryptic_history(), sprintf("Q: %s\nA: %s", question, out$text)))
+      }
+      # keep the sources from the first interpretation visible on follow-ups
+      prev <- cryptic_interp()
+      src <- if (!is.null(out$sources)) out$sources else if (!is.null(prev)) prev$sources else NULL
+      cryptic_interp(list(text = out$text, sources = src))
+    }, error = function(e) cryptic_interp_err(conditionMessage(e)))
+  }
+  observeEvent(input$cryptic_interpret, {
+    req(cryptic_res()); withProgress(message = "Interpreting locally...", value = 0.5, .run_cryptic_interp())
+  })
+  observeEvent(input$cryptic_ask, {
+    q <- trimws(input$cryptic_followup %||% "")
+    if (nzchar(q)) {
+      withProgress(message = "Thinking locally...", value = 0.5, .run_cryptic_interp(question = q))
+      updateTextInput(session, "cryptic_followup", value = "")
+    }
+  })
+
+  observeEvent(input$cryptic_design_junc_go, {
+    req(cryptic_res())
+    if (is.null(cryptic_res()$transcript)) {
+      cryptic_err("No annotated transcript in this region -- can't anchor a primer design here."); return(invisible())
+    }
+    sel <- input$cryptic_junc_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) { cryptic_err("Select a junction row first."); return(invisible()) }
+    df <- cryptic_junc_filtered()[sel, ]
+    tx <- cryptic_res()$transcript
+    run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
+                        input$cryptic_assembly, df$start, df$end,
+                        sprintf("Novel junction %s:%d-%d", cryptic_res()$chrom, df$start, df$end),
+                        cryptic_err)
+  })
+
+  observeEvent(input$cryptic_design_exon_go, {
+    req(cryptic_res())
+    if (is.null(cryptic_res()$transcript)) {
+      cryptic_err("No annotated transcript in this region -- can't anchor a primer design here."); return(invisible())
+    }
+    sel <- input$cryptic_exon_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) { cryptic_err("Select a candidate exon row first."); return(invisible()) }
+    df <- cryptic_res()$candidates$candidate_exons[sel, ]
+    tx <- cryptic_res()$transcript
+    run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
+                        input$cryptic_assembly, df$start, df$end, "Candidate cryptic exon",
+                        cryptic_err, cryptic_exon = list(start = df$start, end = df$end))
+  })
+
+  # -- same hand-off, triggered by clicking "Design primers for this ->" inside
+  # a pinned tooltip on the sashimi plot itself (SASHIMI_JS's click delegate on
+  # .sashimi-design-link), instead of selecting a DT row first --
+  observeEvent(input$cryptic_plot_design_target, {
+    req(cryptic_res())
+    if (is.null(cryptic_res()$transcript)) {
+      cryptic_err("No annotated transcript in this region -- can't anchor a primer design here."); return(invisible())
+    }
+    tgt <- input$cryptic_plot_design_target
+    tx <- cryptic_res()$transcript
+    label <- if (identical(tgt$kind, "annotated_exon")) (tgt$name %||% "Exon")
+      else if (identical(tgt$kind, "exon")) "Candidate cryptic exon"
+      else sprintf("Novel junction %s:%d-%d", cryptic_res()$chrom, as.integer(tgt$start), as.integer(tgt$end))
+    # only a candidate cryptic exon (kind == "exon") carries a true exon span to
+    # anchor a cryptic-specific primer in; junctions/annotated exons don't
+    ce <- if (identical(tgt$kind, "exon")) list(start = as.integer(tgt$start), end = as.integer(tgt$end)) else NULL
+    run_design_handoff(list(tx = tx, name = tx$name[1], gene_symbol = tx$gene_symbol[1]),
+                        input$cryptic_assembly, as.integer(tgt$start), as.integer(tgt$end), label,
+                        cryptic_err, cryptic_exon = ce)
+  })
+
+  # Published for the Panel Runner, which re-uses this tool as its viewer: it
+  # writes a locus's already-computed result straight in and jumps here, rather
+  # than re-running detection. The cache is shared so a locus scanned in a panel
+  # run doesn't re-read the BAMs when opened. Methods & Ordering and Protein
+  # Consequence read res only.
+  ctx$publish("cryptic",
+    res = cryptic_res, err = cryptic_err,
+    bam_info = cryptic_bam_info, cache = cryptic_cache,
+    interp = cryptic_interp, interp_err = cryptic_interp_err, history = cryptic_history,
+    aside_none = TRUE)
+}
