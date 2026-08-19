@@ -32,17 +32,80 @@ SASHIMI_DARK_COL <- list(
 )
 
 # --------------------------------------------------------------------------
-# Geometry helpers
+# TWO-LAYER GEOMETRY -- what makes this figure navigable without a round-trip.
+#
+# The figure is emitted as one <svg> with a pixel viewBox (unchanged) holding
+# two sibling groups:
+#
+#   <g class="sashimi-geom" transform="translate(tx,0) scale(sx,1)">
+#        every shape, authored in GENOMIC units on x and pixels on y
+#   <g class="sashimi-labels">
+#        every piece of text, authored in pixels
+#
+# Panning is then `tx += dx` and zooming is `sx *= k` -- one attribute write on
+# one element, no re-render, no server round-trip, and no blur, because SVG is
+# vector. SASHIMI_JS repositions the labels in the same frame from each one's
+# data-bp.
+#
+# WHY A TRANSFORM AND NOT A GENOMIC viewBox. Putting the genomic coordinates in
+# the root viewBox is the more obvious spelling of this, and it was the plan,
+# but it breaks on three things here:
+#
+#   1. The root viewBox is shared with the label layer. Making it genomic forces
+#      text into a counter-scaled overlay whose counter-scale changes on every
+#      zoom -- exactly the "text is 400,000 units wide" failure, just relocated.
+#   2. preserveAspectRatio is already load-bearing in two modes: "none" for the
+#      drag-resizable compact view, "xMidYMid meet" for Expand view. A viewBox of
+#      width 30000 (bp) and height 618 (px) makes `meet` meaningless.
+#   3. The static export (build_sashimi_html -> the download and the headless-
+#      Chrome PDF) has no JS at all, so labels must already be correct with zero
+#      script. They are, because R positions them for the initial view and JS
+#      only ever *re*-positions.
+#
+# A transform on a <g> is the same single-attribute write with the same
+# compositing behaviour, and it leaves all three of those intact.
+#
+# GEOMETRY X IS RELATIVE TO result$start, not absolute bp. Absolute coordinates
+# run to ~2.5e8 on chr1, and multiplying those by an sx of ~1e-4 inside a
+# renderer that may use single-precision floats for path data is asking for
+# visible jitter at deep zoom. Subtracting the window origin keeps authored
+# values in 0..span. The absolute coordinate is still on every element as
+# data-start/data-end, because that is what tooltips and the primer handoff
+# need, and those must never be reconstructed by arithmetic.
+#
+# STROKES DO NOT SCALE. Everything stroked inside the geometry layer carries
+# vector-effect="non-scaling-stroke", so a 1.2px rule stays 1.2px at any zoom
+# instead of becoming a 400 kb-wide slab. This is also what gives thin features
+# a floor: a 3 bp exon is drawn at its true width with a 1px non-scaling stroke,
+# so it stays visible without being drawn wider than it is -- an artificial
+# minimum width in genomic units would lie about the size of small exons at
+# exactly the zoom level where someone is inspecting them.
 # --------------------------------------------------------------------------
 
-#' Linear bp -> pixel-x closure, shared by every track (the genome-browser analog
-#' of plasmid_map.R's .bp_to_angle()).
-.x_of_bp <- function(start, end, x0, x1) {
-  span <- max(1, end - start)
-  function(bp) x0 + (bp - start) / span * (x1 - x0)
+#' The geometry layer's x for a genomic coordinate: bp relative to the window
+#' origin. (Replaces the old .x_of_bp() pixel mapping -- the bp -> pixel step is
+#' now the group transform, and lives in one place instead of every draw call.)
+.geom_x <- function(origin) function(bp) bp - origin
+
+#' The <g> transform mapping a genomic view onto the pixel drawing region.
+#' Composed so a point at `bp` lands at x_left + (bp - view_start) * sx.
+.geom_transform <- function(view_start, view_end, origin, x_left, x_right) {
+  sx <- (x_right - x_left) / max(1, view_end - view_start)
+  tx <- x_left - (view_start - origin) * sx
+  sprintf("translate(%.6f,0) scale(%.10f,1)", tx, sx)
+}
+
+#' Pixels per bp for a view -- the scale JS also computes, kept here so the
+#' initial render and the live render agree by construction.
+.geom_scale <- function(view_start, view_end, x_left, x_right) {
+  (x_right - x_left) / max(1, view_end - view_start)
 }
 
 #' "Nice" round tick positions for a bp axis (1/2/5 x 10^k spacing).
+#' NOTE: duplicated as niceTicks() in SASHIMI_JS, which owns the axis once the
+#' user starts navigating. The duplication is unavoidable -- the static export
+#' has no JS and the live view has no server -- so if you change the stepping
+#' here, change it there, and vice versa.
 .nice_ticks <- function(lo, hi, target = 9) {
   span <- max(1, hi - lo); raw <- span / target
   mag <- 10^floor(log10(raw)); norm <- raw / mag
@@ -51,6 +114,7 @@ SASHIMI_DARK_COL <- list(
 }
 
 #' Format a bp coordinate compactly for axis labels (e.g. 17.64 Mb, 320 kb).
+#' Also duplicated as fmtBp() in SASHIMI_JS -- same reason as .nice_ticks().
 .fmt_bp <- function(bp) {
   if (bp >= 1e6) sprintf("%.2f Mb", bp / 1e6)
   else if (bp >= 1e3) sprintf("%.0f kb", bp / 1e3)
@@ -58,9 +122,10 @@ SASHIMI_DARK_COL <- list(
 }
 
 #' Filled coverage-area path through evenly spaced bins, closed to a baseline.
-.coverage_area <- function(bins, x_left, x_right, baseline, top_y, max_depth) {
+#' xs are in geometry (bp-relative) units spanning [gx_lo, gx_hi].
+.coverage_area <- function(bins, gx_lo, gx_hi, baseline, top_y, max_depth) {
   n <- length(bins)
-  xs <- x_left + (seq_len(n) - 0.5) / n * (x_right - x_left)
+  xs <- gx_lo + (seq_len(n) - 0.5) / n * (gx_hi - gx_lo)
   ys <- baseline - pmin(1, bins / max_depth) * (baseline - top_y)
   pts <- paste(sprintf("%.1f,%.1f", xs, ys), collapse = " L ")
   list(path = sprintf("M %.1f,%.1f L %s L %.1f,%.1f Z", xs[1], baseline, pts, xs[n], baseline),
@@ -75,46 +140,61 @@ SASHIMI_DARK_COL <- list(
   sprintf("M %.1f,%.1f Q %.1f,%.1f %.1f,%.1f", x1, base_y, xm, ctrl_y, x2, base_y)
 }
 
+#' A label for the overlay layer. data-bp is what SASHIMI_JS re-reads on every
+#' pan/zoom to recompute x; a label with no bp (a track name pinned to the left
+#' gutter, a read count pinned to the right) simply omits it and never moves.
+.lbl <- function(x, y, text, ..., bp = NULL, dx = 0, class = NULL) {
+  attrs <- list(...)
+  extra <- paste(sprintf(' %s="%s"', names(attrs), unlist(attrs)), collapse = "")
+  sprintf('<text class="sashimi-lbl%s"%s%s x="%.1f" y="%.1f"%s>%s</text>',
+          if (is.null(class)) "" else paste0(" ", class),
+          if (is.null(bp)) "" else sprintf(' data-bp="%d"', as.integer(bp)),
+          if (dx == 0) "" else sprintf(' data-dx="%.1f"', dx),
+          x, y, extra, text)
+}
+
 # --------------------------------------------------------------------------
 # One coverage + arc track (IGV-style: coverage wiggle at the bottom, junction
 # arcs rising above it, a [0 - max] range tag top-left, sample name to its right).
+# Returns list(geom, labels) -- see the two-layer note above.
 # --------------------------------------------------------------------------
-.track_svg <- function(bins, junctions, x_of, x_left, x_right, y_top, arc_h, cov_h,
+.track_svg <- function(bins, junctions, gx, gx_lo, gx_hi, x_left, x_right, y_top, arc_h, cov_h,
                        label, n_reads, max_depth, max_reads, col, fill, line, arc_col,
-                       novel_keys = character(0), bp_start = NULL, bp_end = NULL) {
+                       novel_keys = character(0), bp_start = NULL, bp_end = NULL,
+                       px_per_bp = 1) {
   baseline <- y_top + arc_h + cov_h
   cov_top <- y_top + arc_h
   track_id <- tolower(label)
-  s <- character(0)
+  s <- character(0); L <- character(0)
 
   # coverage wiggle
-  ar <- .coverage_area(bins, x_left, x_right, baseline, cov_top, max_depth)
+  ar <- .coverage_area(bins, gx_lo, gx_hi, baseline, cov_top, max_depth)
   s <- c(s, sprintf('<path d="%s" fill="%s" opacity="0.9"/>', ar$path, fill))
-  s <- c(s, sprintf('<path d="%s" fill="none" stroke="%s" stroke-width="1.2"/>', ar$line, line))
-  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2"/>',
-                     x_left, baseline, x_right, baseline, col$muted))
+  s <- c(s, sprintf('<path d="%s" fill="none" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>', ar$line, line))
+  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
+                     gx_lo, baseline, gx_hi, baseline, col$muted))
 
   # invisible per-bin hover targets over the coverage zone, so hovering anywhere
   # in the wiggle can show the depth + genomic position at that point -- reuses
   # the exact same bin x-positions .coverage_area() draws with (no new binning).
   if (!is.null(bp_start) && !is.null(bp_end)) {
     n <- length(bins)
-    bin_w <- (x_right - x_left) / n
+    bin_w <- (gx_hi - gx_lo) / n
     for (i in seq_len(n)) {
-      bx <- x_left + (i - 1) * bin_w
+      bx <- gx_lo + (i - 1) * bin_w
       bp <- round(bp_start + (i - 0.5) / n * (bp_end - bp_start))
       s <- c(s, sprintf('<rect class="sashimi-hover-bin" data-position="%d" data-depth="%d" data-track="%s" x="%.2f" y="%.1f" width="%.2f" height="%.1f" fill="transparent"/>',
-                        bp, round(bins[i]), track_id, bx, cov_top, bin_w + 0.5, baseline - cov_top))
+                        bp, round(bins[i]), track_id, bx, cov_top, bin_w, baseline - cov_top))
     }
   }
 
-  # IGV-style range tag + sample label
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11" fill="%s">[0 - %s]</text>',
-                     x_left + 2, y_top + arc_h - 6, col$faint, format(round(max_depth), big.mark = ",")))
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-size="14" font-weight="700" fill="%s">%s</text>',
-                     x_left + 2, y_top + 14, col$ink, label))
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" text-anchor="end" font-size="11.5" fill="%s">%s reads</text>',
-                     x_right, y_top + 14, col$muted, format(n_reads, big.mark = ",")))
+  # IGV-style range tag + sample label -- pinned to the gutters, so they carry no
+  # data-bp and stay put while the genome scrolls underneath them.
+  L <- c(L, .lbl(x_left + 2, y_top + arc_h - 6, sprintf("[0 - %s]", format(round(max_depth), big.mark = ",")),
+                 `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", `font-size` = "11", fill = col$faint))
+  L <- c(L, .lbl(x_left + 2, y_top + 14, label, `font-size` = "14", `font-weight` = "700", fill = col$ink))
+  L <- c(L, .lbl(x_right, y_top + 14, sprintf("%s reads", format(n_reads, big.mark = ",")),
+                 `text-anchor` = "end", `font-size` = "11.5", fill = col$muted))
 
   # junction arcs, drawn tallest-support last so heavy junctions sit on top
   if (nrow(junctions) > 0) {
@@ -123,27 +203,35 @@ SASHIMI_DARK_COL <- list(
     for (i in seq_len(nrow(jo))) {
       j <- jo[i, ]; frac <- log1p(j$reads) / lr_max
       is_novel <- sprintf("%d-%d", j$start, j$end) %in% novel_keys
-      ax1 <- x_of(j$start); ax2 <- x_of(j$end)
+      ax1 <- gx(j$start); ax2 <- gx(j$end)
       apex <- cov_top - frac * (cov_top - y_top - 10)
       cc <- if (is_novel) col$novel else arc_col
       sw <- 1 + 3.2 * frac
+      jkey <- sprintf("%d-%d", j$start, j$end)
       s <- c(s, sprintf(
-        '<g class="sashimi-junction%s" tabindex="0" role="button" data-start="%d" data-end="%d" data-reads="%d" data-novel="%s" data-track="%s" aria-label="%s junction %d-%d, %d reads">',
+        '<g class="sashimi-junction%s" tabindex="0" role="button" data-start="%d" data-end="%d" data-reads="%d" data-novel="%s" data-track="%s" data-jkey="%s" aria-label="%s junction %d-%d, %d reads">',
         if (is_novel) " sashimi-junction-novel" else "", j$start, j$end, j$reads,
-        if (is_novel) "true" else "false", track_id, label, j$start, j$end, j$reads))
+        if (is_novel) "true" else "false", track_id, jkey, label, j$start, j$end, j$reads))
       arc_d <- .sashimi_arc(ax1, ax2, cov_top, apex)
-      hit_x <- min(ax1, ax2) - 4; hit_w <- abs(ax2 - ax1) + 8
-      hit_y <- apex - 6; hit_h <- (cov_top - apex) + 12
-      s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="transparent"/>',
-                        hit_x, hit_y, hit_w, hit_h))
-      s <- c(s, sprintf('<path class="sashimi-junction-arc" d="%s" fill="none" stroke="%s" stroke-width="%.2f" opacity="%s"/>',
+      # Hit target: a fat TRANSPARENT stroke along the arc itself, with
+      # pointer-events="stroke". A padded rect (what this used to be) can't work
+      # once x is genomic -- its "4px" of padding would be 4 bp, i.e. invisible
+      # when zoomed out and enormous when zoomed in. A non-scaling stroke gives a
+      # constant ~14px grab corridor that follows the curve at every zoom level.
+      s <- c(s, sprintf('<path class="sashimi-junction-hit" d="%s" fill="none" stroke="transparent" stroke-width="14" vector-effect="non-scaling-stroke" pointer-events="stroke"/>', arc_d))
+      s <- c(s, sprintf('<path class="sashimi-junction-arc" d="%s" fill="none" stroke="%s" stroke-width="%.2f" vector-effect="non-scaling-stroke" opacity="%s"/>',
                         arc_d, cc, sw, if (is_novel) "0.95" else "0.7"))
-      s <- c(s, sprintf('<text x="%.1f" y="%.1f" text-anchor="middle" font-size="11" font-weight="%s" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="%s">%d</text>',
-                        (ax1 + ax2) / 2, apex - 4, if (is_novel) "800" else "600", cc, j$reads))
       s <- c(s, '</g>')
+      # the read-count label rides in the overlay, keyed back to its arc so
+      # applyFilter() can dim the two together
+      L <- c(L, .lbl(x_left + (ax1 + ax2) / 2 * px_per_bp, apex - 4, j$reads,
+                     bp = (j$start + j$end) / 2, class = "sashimi-jlabel",
+                     `data-jkey` = jkey, `text-anchor` = "middle", `font-size` = "11",
+                     `font-weight` = if (is_novel) "800" else "600",
+                     `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", fill = cc))
     }
   }
-  paste(s, collapse = "")
+  list(geom = paste(s, collapse = ""), labels = paste(L, collapse = ""))
 }
 
 # --------------------------------------------------------------------------
@@ -168,70 +256,90 @@ SASHIMI_DARK_COL <- list(
   segs
 }
 
-.gene_track_svg <- function(transcript, x_of, y_top, height, col, note = NULL) {
+.gene_track_svg <- function(transcript, gx, x_left, y_top, height, col, note = NULL,
+                            px_per_bp = 1, view_start = NULL) {
   y_mid <- y_top + height / 2 + 6; exon_h_cds <- 22; exon_h_utr <- 12
-  x_l <- x_of(min(transcript$start)); x_r <- x_of(max(transcript$end))
-  s <- character(0)
+  tx_lo <- min(transcript$start); tx_hi <- max(transcript$end)
+  g_l <- gx(tx_lo); g_r <- gx(tx_hi)
+  s <- character(0); L <- character(0); U <- character(0)
+  px <- function(bp) x_left + (gx(bp) - gx(view_start)) * px_per_bp
 
-  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.6"/>',
-                     x_l, y_mid, x_r, y_mid, col$intron))
+  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.6" vector-effect="non-scaling-stroke"/>',
+                     g_l, y_mid, g_r, y_mid, col$intron))
   dir <- if (identical(transcript$strand[1], "-")) -1 else 1
-  if (x_r - x_l > 40) {
-    for (cx in seq(x_l + 26, x_r - 14, by = 46)) {
-      s <- c(s, sprintf('<path d="M %.1f,%.1f L %.1f,%.1f L %.1f,%.1f" fill="none" stroke="%s" stroke-width="1.4"/>',
+
+  # Strand chevrons are pixel-spaced decoration (every 46px along the visible
+  # intron line), so they can't live in the genomic layer -- a chevron scaled by
+  # sx stops being a chevron. They go in their own UNDERLAY group, which is
+  # pixel space like the labels but painted BEFORE the geometry, so exon boxes
+  # cover the chevrons that fall inside them exactly as they did when both were
+  # drawn in one layer. SASHIMI_JS regenerates them on every view change; R
+  # still emits the initial set, because the static export (download / PDF) runs
+  # with no JS at all and must be complete on its own.
+  px_l <- px(tx_lo); px_r <- px(tx_hi)
+  if (px_r - px_l > 40) {
+    for (cx in seq(px_l + 26, px_r - 14, by = 46)) {
+      U <- c(U, sprintf('<path class="sashimi-chevron" d="M %.1f,%.1f L %.1f,%.1f L %.1f,%.1f" fill="none" stroke="%s" stroke-width="1.4"/>',
                         cx - 4 * dir, y_mid - 4, cx + 4 * dir, y_mid, cx - 4 * dir, y_mid + 4, col$intron))
     }
   }
+
   for (i in seq_len(nrow(transcript))) {
-    ex <- transcript[i, ]; x0e <- x_of(ex$start); x1e <- x_of(ex$end)
+    ex <- transcript[i, ]
     cls <- classify_exon_region(ex$start, ex$end, ex$cds_start, ex$cds_end, transcript$strand[1])
     segs <- .exon_utr_cds_segments(ex$start, ex$end, ex$cds_start, ex$cds_end)
 
-    # invisible full-height hit target first, so hovering/clicking a thin
-    # UTR sliver is exactly as easy as clicking the CDS part of the same exon
+    # invisible hit target first, so hovering/clicking a thin UTR sliver -- or a
+    # small exon at low zoom -- is exactly as easy as clicking a wide CDS block.
+    # The generous area comes from a transparent NON-SCALING stroke rather than
+    # padded width, so it stays ~4px on each side at every zoom.
     s <- c(s, sprintf(
       paste0('<g class="sashimi-exon" tabindex="0" role="button" data-name="Exon %d" ',
              'data-start="%d" data-end="%d" data-length="%d" data-region="%s" ',
              'aria-label="Exon %d, %s, %d-%d, %d bp">'),
       ex$exon_number, ex$start, ex$end, ex$length, cls$region,
       ex$exon_number, cls$region, ex$start, ex$end, ex$length))
-    s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%d" fill="transparent"/>',
-                      x0e, y_mid - exon_h_cds / 2 - 4, max(1.5, x1e - x0e), exon_h_cds + 8))
+    s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%d" fill="transparent" stroke="transparent" stroke-width="8" vector-effect="non-scaling-stroke" pointer-events="all"/>',
+                      gx(ex$start), y_mid - exon_h_cds / 2 - 4, max(0.01, gx(ex$end) - gx(ex$start)), exon_h_cds + 8))
     for (seg in segs) {
-      sx0 <- x_of(seg$start); sx1 <- x_of(seg$end)
       h <- if (seg$cds) exon_h_cds else exon_h_utr
-      s <- c(s, sprintf('<rect class="sashimi-exon-box" x="%.1f" y="%.1f" width="%.1f" height="%d" rx="2" fill="%s" stroke="%s" stroke-width="1"/>',
-                        sx0, y_mid - h / 2, max(1.5, sx1 - sx0), h, col$exon_fill, col$exon_stroke))
+      s <- c(s, sprintf('<rect class="sashimi-exon-box" x="%.1f" y="%.1f" width="%.1f" height="%d" fill="%s" stroke="%s" stroke-width="1" vector-effect="non-scaling-stroke"/>',
+                        gx(seg$start), y_mid - h / 2, max(0.01, gx(seg$end) - gx(seg$start)), h, col$exon_fill, col$exon_stroke))
     }
     s <- c(s, '</g>')
   }
   lbl <- transcript$name[1]
   strand_txt <- if (dir < 0) "(- strand)" else "(+ strand)"
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-size="13" font-weight="700" fill="%s">%s <tspan fill="%s" font-weight="500">%s</tspan></text>',
-                     x_l, y_top + 14, col$ink, lbl, col$muted, strand_txt))
+  L <- c(L, .lbl(px_l, y_top + 14,
+                 sprintf('%s <tspan fill="%s" font-weight="500">%s</tspan>', lbl, col$muted, strand_txt),
+                 bp = tx_lo, `font-size` = "13", `font-weight` = "700", fill = col$ink))
   if (!is.null(note)) {
-    s <- c(s, sprintf('<text x="%.1f" y="%.1f" text-anchor="end" font-size="11.5" fill="%s">%s</text>',
-                      x_r, y_top + 14, col$faint, note))
+    L <- c(L, .lbl(px_r, y_top + 14, note, bp = tx_hi, `text-anchor` = "end",
+                   `font-size` = "11.5", fill = col$faint))
   }
-  paste(s, collapse = "")
+  list(geom = paste(s, collapse = ""), labels = paste(L, collapse = ""),
+       underlay = paste(U, collapse = ""))
 }
 
 # --------------------------------------------------------------------------
-# Genomic coordinate ruler.
+# Genomic coordinate ruler. Tick MARKS are geometry (they must track the
+# genome); tick LABELS are overlay. SASHIMI_JS rebuilds both on view change,
+# because the round numbers themselves change as you zoom -- a ruler that
+# panned its old labels along would be worse than no ruler.
 # --------------------------------------------------------------------------
-.axis_svg <- function(chrom, start, end, x_of, y_top, col) {
-  s <- character(0)
-  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2"/>',
-                     x_of(start), y_top, x_of(end), y_top, col$muted))
+.axis_svg <- function(chrom, start, end, gx, x_left, x_right, y_top, col, px_per_bp = 1) {
+  s <- character(0); L <- character(0)
+  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
+                     gx(start), y_top, gx(end), y_top, col$muted))
   for (t in .nice_ticks(start, end)) {
-    xt <- x_of(t)
-    s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2"/>', xt, y_top, xt, y_top + 6, col$muted))
-    s <- c(s, sprintf('<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10.5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="%s">%s</text>',
-                      xt, y_top + 20, col$muted, .fmt_bp(t)))
+    s <- c(s, sprintf('<line class="sashimi-tick" x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
+                      gx(t), y_top, gx(t), y_top + 6, col$muted))
+    L <- c(L, .lbl(x_left + (gx(t) - gx(start)) * px_per_bp, y_top + 20, .fmt_bp(t), bp = t,
+                   class = "sashimi-ticklabel", `text-anchor` = "middle", `font-size` = "10.5",
+                   `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", fill = col$muted))
   }
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-size="11.5" font-weight="600" fill="%s">%s</text>',
-                    x_of(start), y_top + 20, col$ink, chrom))
-  paste(s, collapse = "")
+  L <- c(L, .lbl(x_left, y_top + 20, chrom, `font-size` = "11.5", `font-weight` = "600", fill = col$ink))
+  list(geom = paste(s, collapse = ""), labels = paste(L, collapse = ""))
 }
 
 # --------------------------------------------------------------------------
@@ -244,21 +352,24 @@ sashimi_svg <- function(result, dark = FALSE) {
   # busiest track so arcs/labels actually get more relative room -- ~44px of
   # user-space per junction, enough for a 4-digit monospace label plus a gap.
   # By default the CSS (ui_helpers.R's .l2b-sashimi svg{width:100%}) still
-  # scales the whole thing down to the same on-screen footprint as before
-  # (uniform scaling preserves the now-correct relative spacing, so labels
-  # stop overlapping even though everything renders a bit smaller for a
-  # dense locus) -- this is what actually fixes the collision bug, not just
-  # a cosmetic default. "Expand view" (SASHIMI_JS) then reads data-native-width
-  # below and sets it as an inline pixel width, breaking out of that 100%
-  # squish to show it at full native/readable size with real horizontal
-  # scroll + drag-to-pan for when small text isn't good enough.
+  # scales the whole thing down to the same on-screen footprint as before.
+  # "Expand view" (SASHIMI_JS) then reads data-native-width below and sets it as
+  # an inline pixel width, breaking out of that 100% squish.
   n_junctions <- max(nrow(result$control$junctions), nrow(result$knockdown$junctions))
   W <- max(1240, min(6000, round(n_junctions * 44)))
   LEFT <- 62; RIGHT <- 26
   PAD_TOP <- 20; ARC_H <- 96; COV_H <- 118; TRACK_LBL <- 4
   GAP <- 26; GENE_H <- 74; AXIS_H <- 30
   x_left <- LEFT; x_right <- W - RIGHT
-  x_of <- .x_of_bp(result$start, result$end, x_left, x_right)
+
+  # geometry x = bp - origin (see the two-layer note); the bp -> pixel step is
+  # the <g> transform, and px_per_bp is only needed to place the INITIAL label
+  # positions, since JS recomputes them from data-bp on every move after that.
+  origin <- result$start
+  gx <- .geom_x(origin)
+  gx_lo <- gx(result$start); gx_hi <- gx(result$end)
+  px_per_bp <- .geom_scale(result$start, result$end, x_left, x_right)
+  geom_tf <- .geom_transform(result$start, result$end, origin, x_left, x_right)
 
   y_ctrl <- PAD_TOP
   y_kd    <- y_ctrl + ARC_H + COV_H + GAP
@@ -274,59 +385,88 @@ sashimi_svg <- function(result, dark = FALSE) {
   nj <- result$candidates$novel_junctions
   if (!is.null(nj) && nrow(nj) > 0) novel_keys <- sprintf("%d-%d", nj$start, nj$end)
 
-  # no inline width here -- CSS width:100% (compact, the default) governs
-  # on-screen size unless/until SASHIMI_JS's "Expand view" toggle sets one.
-  #
-  # data-view-*/-x-* let SASHIMI_JS invert a click's screen position back to a
-  # bp coordinate (for double-click-to-zoom) without duplicating .x_of_bp()'s
-  # math in JS; data-orig-*  is the window the "Reset view"/zoom-out-to-full
-  # button returns to, which stays the originally-requested locus across any
-  # number of zoom steps (see app.R's zoom observer, which carries it forward
-  # rather than recomputing it from the current, possibly zoomed, window).
+  # data-* the client navigates by:
+  #   data-origin       absolute bp of geometry x = 0
+  #   data-view-*       the window currently on screen (moves as you pan)
+  #   data-render-*     the window this SVG actually has data for; panning
+  #                     outside it shows nothing, which is what triggers a tile
+  #   data-tile-*       the buffered span the server can serve from cache
+  #   data-orig-*       what "Reset view" returns to -- the originally requested
+  #                     locus, carried forward unchanged through every zoom step
+  #   data-x-left/right the pixel drawing region the transform maps onto
   orig_start <- if (is.null(result$orig_start)) result$start else result$orig_start
   orig_end <- if (is.null(result$orig_end)) result$end else result$orig_end
+  tile_start <- if (is.null(result$tile_start)) result$start else result$tile_start
+  tile_end <- if (is.null(result$tile_end)) result$end else result$tile_end
+  view_start <- if (is.null(result$view_start)) result$start else result$view_start
+  view_end <- if (is.null(result$view_end)) result$end else result$view_end
   s <- c(sprintf(paste0(
-    '<svg viewBox="0 0 %d %d" data-native-width="%d" ',
-    'data-view-start="%d" data-view-end="%d" data-orig-start="%d" data-orig-end="%d" ',
+    '<svg viewBox="0 0 %d %d" data-native-width="%d" data-origin="%d" ',
+    'data-view-start="%d" data-view-end="%d" data-render-start="%d" data-render-end="%d" ',
+    'data-tile-start="%d" data-tile-end="%d" data-orig-start="%d" data-orig-end="%d" ',
     'data-x-left="%d" data-x-right="%d" ',
     'xmlns="http://www.w3.org/2000/svg" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" ',
     'role="img" aria-label="IGV-style sashimi plot: control vs knockdown coverage and splice junctions">'),
-    W, H, W, result$start, result$end, orig_start, orig_end, x_left, x_right))
+    W, H, W, origin, view_start, view_end, result$start, result$end,
+    tile_start, tile_end, orig_start, orig_end, x_left, x_right))
 
-  # panel backdrop
+  # panel backdrop -- pixel space, outside the geometry layer, so it stays put
   s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="8" fill="%s" stroke="%s"/>',
                     x_left - 10, PAD_TOP - 12, (x_right - x_left) + 20, H - PAD_TOP + 6, COL$panel, COL$panel_edge))
+
+  # clip the genome layer to the drawing region, so panned-in features can't
+  # spill over the gutters where the pinned labels live
+  s <- c(s, sprintf('<defs><clipPath id="sashimi-clip"><rect x="%.1f" y="%.1f" width="%.1f" height="%.1f"/></clipPath></defs>',
+                    x_left - 8, PAD_TOP - 10, (x_right - x_left) + 16, H - PAD_TOP + 2))
+
+  g <- character(0); L <- character(0); U <- character(0)
 
   # candidate-exon highlight bands, spanning every track
   ce <- result$candidates$candidate_exons
   if (!is.null(ce) && nrow(ce) > 0) {
     for (i in seq_len(nrow(ce))) {
-      bx0 <- x_of(ce$start[i]); bx1 <- x_of(ce$end[i])
-      s <- c(s, sprintf(
-        '<rect class="sashimi-ce-band" tabindex="0" role="button" data-start="%d" data-end="%d" data-length="%d" data-kd-reads="%d" data-control-reads="%d" aria-label="Candidate cryptic exon %d-%d, %d bp" x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>',
+      g <- c(g, sprintf(
+        '<rect class="sashimi-ce-band" tabindex="0" role="button" data-start="%d" data-end="%d" data-length="%d" data-kd-reads="%d" data-control-reads="%d" aria-label="Candidate cryptic exon %d-%d, %d bp" x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s" vector-effect="non-scaling-stroke"/>',
         ce$start[i], ce$end[i], ce$length[i], ce$kd_reads[i], ce$control_reads[i], ce$start[i], ce$end[i], ce$length[i],
-        min(bx0, bx1), PAD_TOP - 4, max(2, abs(bx1 - bx0)), y_axis - PAD_TOP, COL$novel_soft))
+        gx(ce$start[i]), PAD_TOP - 4, max(0.01, gx(ce$end[i]) - gx(ce$start[i])), y_axis - PAD_TOP, COL$novel_soft))
     }
   }
 
-  s <- c(s, .track_svg(result$control$coverage, result$control$junctions, x_of, x_left, x_right,
-                       y_ctrl, ARC_H, COV_H, "Control", result$control$n_reads, max_depth, max_reads,
-                       COL, COL$ctrl_fill, COL$ctrl_line, COL$ctrl_arc,
-                       bp_start = result$start, bp_end = result$end))
-  s <- c(s, .track_svg(result$knockdown$coverage, result$knockdown$junctions, x_of, x_left, x_right,
-                       y_kd, ARC_H, COV_H, "Knockdown", result$knockdown$n_reads, max_depth, max_reads,
-                       COL, COL$kd_fill, COL$kd_line, COL$kd_arc, novel_keys = novel_keys,
-                       bp_start = result$start, bp_end = result$end))
+  ctrl <- .track_svg(result$control$coverage, result$control$junctions, gx, gx_lo, gx_hi,
+                     x_left, x_right, y_ctrl, ARC_H, COV_H, "Control", result$control$n_reads,
+                     max_depth, max_reads, COL, COL$ctrl_fill, COL$ctrl_line, COL$ctrl_arc,
+                     bp_start = result$start, bp_end = result$end, px_per_bp = px_per_bp)
+  kdt <- .track_svg(result$knockdown$coverage, result$knockdown$junctions, gx, gx_lo, gx_hi,
+                    x_left, x_right, y_kd, ARC_H, COV_H, "Knockdown", result$knockdown$n_reads,
+                    max_depth, max_reads, COL, COL$kd_fill, COL$kd_line, COL$kd_arc,
+                    novel_keys = novel_keys, bp_start = result$start, bp_end = result$end,
+                    px_per_bp = px_per_bp)
+  g <- c(g, ctrl$geom, kdt$geom); L <- c(L, ctrl$labels, kdt$labels)
 
   if (!is.null(result$transcript)) {
     note <- if (result$n_other_isoforms > 0) sprintf("+ %d more isoform(s) in region", result$n_other_isoforms) else NULL
-    s <- c(s, .gene_track_svg(result$transcript, x_of, y_gene, GENE_H, COL, note = note))
+    gt <- .gene_track_svg(result$transcript, gx, x_left, y_gene, GENE_H, COL, note = note,
+                          px_per_bp = px_per_bp, view_start = result$start)
+    g <- c(g, gt$geom); L <- c(L, gt$labels); U <- c(U, gt$underlay)
   } else {
-    s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-size="12" fill="%s">No annotated transcript in this window.</text>',
-                      x_left, y_gene + GENE_H / 2, COL$muted))
+    L <- c(L, .lbl(x_left, y_gene + GENE_H / 2, "No annotated transcript in this window.",
+                   `font-size` = "12", fill = COL$muted))
   }
-  s <- c(s, .axis_svg(result$chrom, result$start, result$end, x_of, y_axis, COL))
+  ax <- .axis_svg(result$chrom, result$start, result$end, gx, x_left, x_right, y_axis, COL,
+                  px_per_bp = px_per_bp)
+  g <- c(g, ax$geom); L <- c(L, ax$labels)
 
+  # NOTE: the clip lives on an OUTER, untransformed <g>, not on the geometry
+  # group itself. clipPathUnits="userSpaceOnUse" resolves in the coordinate
+  # system of the element that REFERENCES the clip -- which, for an element
+  # carrying its own transform, is the post-transform space. Putting both on one
+  # <g> silently scales the clip rectangle by sx too, collapsing the whole figure
+  # into the left ~200px. Two groups keeps the clip in pixels and the genome in bp.
+  s <- c(s, '<g class="sashimi-underlay">', U, '</g>')
+  s <- c(s, '<g clip-path="url(#sashimi-clip)">',
+         sprintf('<g class="sashimi-geom" transform="%s">', geom_tf),
+         g, '</g></g>')
+  s <- c(s, '<g class="sashimi-labels">', L, '</g>')
   s <- c(s, '</svg>')
   paste(s, collapse = "")
 }
