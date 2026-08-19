@@ -33,40 +33,76 @@
 # fired from a pinned tooltip on the plot itself (SASHIMI_JS's click delegate on
 # .sashimi-design-link), which skips the DT row selection entirely.
 
+# The Cryptic Engine is the one tool that takes the whole app over. Everything
+# else in Lit2Bench is a form that produces an answer; this is an instrument you
+# read, and an instrument squeezed into two thirds of a column with a permanent
+# 4-card form beside it is not an instrument. So the layout inverts:
+#
+#   a persistent toolbar   locus, assembly, Run, and the view controls -- the
+#                          only things you touch while actually looking
+#   a settings drawer      BAM paths, upload, thresholds. Set once per session,
+#                          so they slide away instead of occupying half the screen
+#   the stage              the figure, filling every pixel that is left
+#   the dock               result tables, collapsible, docked to the bottom
+#
+# This uses the data-tool mechanism documented in ui_helpers.R rather than ad hoc
+# CSS: the server pushes the active tool id to the client, body[data-tool='cryptic']
+# selects the takeover rules, and every other tool is untouched by them. The nav
+# is hidden rather than removed, and the toolbar carries a button to bring it
+# back -- a full-screen tool with no way out is a trap, not a takeover.
+#
+# Every input id is unchanged. The server half of this file does not know or care
+# that the furniture moved.
 panel_cryptic <- function() {
-  layout_columns(col_widths = c(4, 8),
-    div(
-      l2b_card(1, "Locus", "A literal locus is reliable; a gene symbol is a best-effort UCSC lookup.",
-        textInput("cryptic_locus", "Locus or gene symbol", value = "UNC13A"),
-        selectInput("cryptic_assembly", "Assembly", choices = c("hg38", "hg19"), selected = "hg38")),
-      l2b_card(2, "BAM source", "Lit2Bench runs on the same machine as your data, so pointing at BAMs already on disk skips the browser upload and the copy entirely -- near-instant even for multi-GB files. Upload is still there for files that aren't local.",
-        radioButtons("cryptic_bam_source", NULL,
-                      choices = c("Local file path (fastest)" = "path", "Upload through browser" = "upload"),
-                      selected = "path")),
-      conditionalPanel("input.cryptic_bam_source == 'path'",
-        l2b_card(3, "Control BAM path(s)", "One path per line, or comma-separated. Globs (/data/ctrl_*.bam) and ~ work. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
-          textAreaInput("cryptic_control_paths", NULL, rows = 2, resize = "vertical",
-                        placeholder = "/path/to/SCR_DMSO.bam")),
-        l2b_card(4, "Knockdown BAM path(s)", "Same as above, for the TDP-43 (or other) knockdown/knockout sample.",
-          textAreaInput("cryptic_kd_paths", NULL, rows = 2, resize = "vertical",
-                        placeholder = "/path/to/TDP43KD_11j.bam")),
-        checkboxInput("cryptic_force_reindex",
-                      "Force re-index BAMs (ignore any existing .bai, rebuild from the file's current bytes -- slower, but a hard guarantee instead of a freshness check)",
-                      value = FALSE)),
-      conditionalPanel("input.cryptic_bam_source == 'upload'",
-        l2b_card(3, "Control BAM", "Select one or more replicate .bam files (and their .bai's, if you have them) together. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
-          fileInput("cryptic_control_files", NULL, multiple = TRUE, accept = c(".bam", ".bai"))),
-        l2b_card(4, "Knockdown BAM", "Same as above, for the TDP-43 (or other) knockdown/knockout sample -- one or more replicates.",
-          fileInput("cryptic_kd_files", NULL, multiple = TRUE, accept = c(".bam", ".bai")))),
-      l2b_card(5, "Detection thresholds", "A knockdown junction counts as novel below max control reads and absent from RefSeq. Re-running after changing only these is near-instant -- the BAM reads and annotation are cached per session, and only the thresholds are recomputed.",
-        fluidRow(column(6, numericInput("cryptic_min_kd_reads", "Min KD reads", value = 3, min = 1)),
-                 column(6, numericInput("cryptic_max_ctrl_reads", "Max control reads", value = 1, min = 0))),
-        fluidRow(column(6, numericInput("cryptic_exon_min", "Min candidate exon (bp)", value = 20, min = 1)),
-                 column(6, numericInput("cryptic_exon_max", "Max candidate exon (bp)", value = 400, min = 1))),
-        br(),
-        actionButton("cryptic_go", "Run detection", class = "btn-run"))
+  div(class = "l2b-igv",
+
+    div(class = "l2b-igv-bar",
+      tags$button(type = "button", class = "l2b-igv-navbtn", id = "cryptic_nav_toggle",
+                  title = "Show the tool list", "\U2630"),
+      div(class = "l2b-igv-name", "Cryptic Splicing Engine"),
+      div(class = "l2b-igv-locus",
+        textInput("cryptic_locus", NULL, value = "UNC13A", placeholder = "gene symbol or chr:start-end"),
+        selectInput("cryptic_assembly", NULL, choices = c("hg38", "hg19"), selected = "hg38")),
+      actionButton("cryptic_go", "Run detection", class = "btn-run l2b-igv-run"),
+      tags$button(type = "button", class = "l2b-igv-ghost l2b-igv-drawer-toggle",
+                  title = "BAM files and detection thresholds", "\U2699 Data & thresholds")
     ),
-    div(uiOutput("cryptic_out"))
+
+    # -- settings drawer: everything you set once and then stop looking at --
+    div(class = "l2b-igv-drawer",
+      div(class = "l2b-igv-drawer-inner",
+        div(class = "l2b-igv-drawer-head",
+            span("Data & thresholds"),
+            tags$button(type = "button", class = "l2b-igv-ghost l2b-igv-drawer-toggle", "Close")),
+        l2b_card(1, "BAM source", "Lit2Bench runs on the same machine as your data, so pointing at BAMs already on disk skips the browser upload and the copy entirely -- near-instant even for multi-GB files. Upload is still there for files that aren't local.",
+          radioButtons("cryptic_bam_source", NULL,
+                        choices = c("Local file path (fastest)" = "path", "Upload through browser" = "upload"),
+                        selected = "path")),
+        conditionalPanel("input.cryptic_bam_source == 'path'",
+          l2b_card(2, "Control BAM path(s)", "One path per line, or comma-separated. Globs (/data/ctrl_*.bam) and ~ work. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
+            textAreaInput("cryptic_control_paths", NULL, rows = 2, resize = "vertical",
+                          placeholder = "/path/to/SCR_DMSO.bam")),
+          l2b_card(3, "Knockdown BAM path(s)", "Same as above, for the TDP-43 (or other) knockdown/knockout sample.",
+            textAreaInput("cryptic_kd_paths", NULL, rows = 2, resize = "vertical",
+                          placeholder = "/path/to/TDP43KD_11j.bam")),
+          checkboxInput("cryptic_force_reindex",
+                        "Force re-index BAMs (ignore any existing .bai, rebuild from the file's current bytes -- slower, but a hard guarantee instead of a freshness check)",
+                        value = FALSE)),
+        conditionalPanel("input.cryptic_bam_source == 'upload'",
+          l2b_card(2, "Control BAM", "Select one or more replicate .bam files (and their .bai's, if you have them) together. 2+ replicates per condition also unlocks the differential-splicing (PSI/ΔPSI) table below.",
+            fileInput("cryptic_control_files", NULL, multiple = TRUE, accept = c(".bam", ".bai"))),
+          l2b_card(3, "Knockdown BAM", "Same as above, for the TDP-43 (or other) knockdown/knockout sample -- one or more replicates.",
+            fileInput("cryptic_kd_files", NULL, multiple = TRUE, accept = c(".bam", ".bai")))),
+        l2b_card(4, "Detection thresholds", "A knockdown junction counts as novel below max control reads and absent from RefSeq. Re-running after changing only these is near-instant -- the BAM reads and annotation are cached per session, and only the thresholds are recomputed.",
+          fluidRow(column(6, numericInput("cryptic_min_kd_reads", "Min KD reads", value = 3, min = 1)),
+                   column(6, numericInput("cryptic_max_ctrl_reads", "Max control reads", value = 1, min = 0))),
+          fluidRow(column(6, numericInput("cryptic_exon_min", "Min candidate exon (bp)", value = 20, min = 1)),
+                   column(6, numericInput("cryptic_exon_max", "Max candidate exon (bp)", value = 400, min = 1))))
+      )
+    ),
+    div(class = "l2b-igv-scrim"),
+
+    div(class = "l2b-igv-stage", uiOutput("cryptic_out"))
   )
 }
 
@@ -305,89 +341,97 @@ server_cryptic <- function(input, output, session, ctx) {
     if (!is.null(figstate$view)) { r$view_start <- figstate$view$start; r$view_end <- figstate$view$end }
     max_j_reads <- max(1, r$control$junctions$reads, r$knockdown$junctions$reads)
     tagList(
-      div(class = "l2b-card",
-        uiOutput("cryptic_hero"),
-        div(style = "display:flex; flex-direction:column; gap:10px; margin-bottom:10px; padding:12px 14px; background:var(--l2b-surface-2); border:1px solid var(--l2b-border); border-radius:10px;",
-            div(style = "display:flex; gap:24px; align-items:center; flex-wrap:wrap;",
-                div(style = "flex:1 1 240px;",
-                    tags$label(style = "font-size:12.5px; color:var(--l2b-text-muted); display:block; margin-bottom:4px;",
-                               "Min. junction reads: ", tags$span(id = "sashimi_filter_val", "1")),
-                    tags$input(type = "range", class = "sashimi-filter-reads", min = "1",
-                               max = as.character(max_j_reads), value = "1", step = "1",
-                               style = "width:100%; accent-color:var(--l2b-accent);")),
-                tags$label(style = "display:flex; align-items:center; gap:7px; font-size:13px; color:var(--l2b-text-muted); cursor:pointer; user-select:none; flex:none;",
-                           tags$input(type = "checkbox", class = "sashimi-filter-novel"), "Novel junctions only")),
-            div(style = "display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding-top:2px; border-top:1px solid var(--l2b-border);",
-                div(class = "l2b-sashimi-toolbar",
-                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-in", title = "Zoom in (or double-click the plot)", "🔍+"),
-                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-out", title = "Zoom out", "🔍−"),
-                    tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-reset", title = "Reset to the full requested region", "⟲"),
-                    div(class = "l2b-sashimi-toolbar-sep"),
-                    tags$button(type = "button", class = "sashimi-expand-toggle", "⤢ Expand view"),
-                    tags$button(type = "button", class = "sashimi-fullscreen-toggle", "⛶ Full screen")),
-                div(style = "font-size:11.5px; color:var(--l2b-text-faint); flex:1 1 auto; display:flex; gap:12px; align-items:center; flex-wrap:wrap;",
-                    tags$span(id = "sashimi_locus_readout", `data-chrom` = r$chrom,
-                              style = "color:var(--l2b-text-muted); font-weight:600;",
-                              sprintf("%s:%s-%s", r$chrom,
-                                      format(r$view_start %||% r$start, big.mark = ","),
-                                      format(r$view_end %||% r$end, big.mark = ","))),
-                    tags$span("Drag to pan · double-click or ⌘/ctrl+scroll to zoom · click a feature to pin it")))),
-        div(class = "l2b-sashimi", HTML(sashimi_svg(r, dark = dark_mode()))),
-        div(class = "l2b-sashimi-resize-handle", title = "Drag to resize", div(class = "l2b-grip")),
-        div(class = "l2b-fig-cap",
-            "Coverage wiggles (control blue, knockdown orange) share one depth scale; arcs are splice junctions, thickness and height scaled by supporting reads and labelled with the count. Novel junctions are drawn in red. Panning and zooming are instant and stay on this machine; the figure is drawn from a window wider than the screen, and reads are re-fetched only when you reach the edge of it or zoom in past the resolution it can honestly show. The tables below always describe the window currently in view."),
-        br(),
-        div(style = "display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px;",
-            downloadButton("cryptic_download_pdf", "Download PDF figure", class = "btn-dl"),
-            downloadButton("cryptic_download_html", "Download HTML figure", class = "btn-dl"),
-            downloadButton("cryptic_download_csv", "Download candidates (CSV)", class = "btn-dl")),
-        tabsetPanel(id = "cryptic_result_tabs", type = "tabs",
-          tabPanel(tagList("Novel junctions (", textOutput("cryptic_n_nj", inline = TRUE), ")"),
-            br(),
-            # value seeded from the current input rather than a hardcoded FALSE:
-            # this whole card (output$cryptic_out) is one renderUI that rebuilds
-            # on every "Run detection" AND every zoom step, which would otherwise
-            # silently reset this checkbox (and the filter it drives) each time --
-            # isolate() reads the live value without making this renderUI block
-            # re-run every time the checkbox itself changes.
-            checkboxInput("cryptic_single_pair_only",
-                          "Localized to one exon pair only (hide junctions that skip a whole annotated exon)",
-                          value = isolate(input$cryptic_single_pair_only) %||% FALSE),
-            DTOutput("cryptic_junc_tbl"),
-            p(class = "l2b-card-sub", "Select a junction row above, then jump straight to the Primer Designer — no manual coordinate entry."),
-            actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;")
-          ),
-          tabPanel(tagList("Candidate exons (", textOutput("cryptic_n_ce", inline = TRUE), ")"),
-            br(),
-            DTOutput("cryptic_exon_tbl"),
-            p(class = "l2b-card-sub", "Select a span row above, then jump straight to the Primer Designer — no manual coordinate entry."),
-            actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;")
-          ),
-          tabPanel(tagList("Retained introns (", textOutput("cryptic_n_ri", inline = TRUE), ")"),
-            br(),
-            p(class = "l2b-card-sub",
-              "Elevated intronic coverage in knockdown, found by scanning each intron at base resolution -- this catches BOTH a fully retained intron (reads pile up across the whole thing instead of being spliced out) AND a cryptic exon buried deep inside a large intron whose own splice junctions are too weak to call (a localized coverage bump the junction tabs can't see). Each row's coordinates are the localized elevated segment. Scored by the intron-retention ratio (segment coverage relative to the gene's exonic level), so it's independent of sequencing depth and expression. TDP-43 loss causes widespread intron retention, so seeing several here is expected -- not necessarily each its own distinct event."),
-            DTOutput("cryptic_retention_tbl"),
-            div(style = "margin-top:10px;", downloadButton("cryptic_download_retention_csv", "Download retained introns (CSV)", class = "btn-dl"))
-          ),
-          tabPanel(tagList("Differential splicing (", textOutput("cryptic_n_ds", inline = TRUE), ")"),
-            br(),
-            p(class = "l2b-card-sub",
-              sprintf(paste0("%d control / %d knockdown replicate(s). PSI = junction reads ÷ reads across all ",
-                             "junctions sharing its donor or acceptor site (an intron cluster); p-values are a ",
-                             "per-junction Fisher's exact test on that 2×2 table, FDR-adjusted (q). This is a ",
-                             "lighter-weight V1 -- a real replicate-variance model (as LeafCutter uses) is future work."),
-                      r$control$n_replicates %||% 1L, r$knockdown$n_replicates %||% 1L)),
-            DTOutput("cryptic_diff_tbl"),
-            div(style = "margin-top:10px;", downloadButton("cryptic_download_diff_csv", "Download differential splicing (CSV)", class = "btn-dl"))
+      div(class = "l2b-igv-work",
+
+        # -- strip: filters and view controls, always visible above the figure --
+        div(class = "l2b-igv-strip",
+            div(style = "display:flex; align-items:center; gap:8px; flex:0 1 250px; min-width:170px;",
+                tags$label(style = "font-size:12px; color:var(--l2b-text-muted); white-space:nowrap;",
+                           "Min reads: ", tags$span(id = "sashimi_filter_val", "1")),
+                tags$input(type = "range", class = "sashimi-filter-reads", min = "1",
+                           max = as.character(max_j_reads), value = "1", step = "1",
+                           style = "flex:1 1 auto; accent-color:var(--l2b-accent);")),
+            tags$label(style = "display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--l2b-text-muted); cursor:pointer; user-select:none; flex:none;",
+                       tags$input(type = "checkbox", class = "sashimi-filter-novel"), "Novel only"),
+            div(class = "l2b-sashimi-toolbar",
+                tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-in", title = "Zoom in (or double-click the plot)", "\U0001f50d+"),
+                tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-out", title = "Zoom out", "\U0001f50d\U2212"),
+                tags$button(type = "button", class = "l2b-icon-btn sashimi-zoom-reset", title = "Reset to the full requested region", "\U27f2"),
+                div(class = "l2b-sashimi-toolbar-sep"),
+                tags$button(type = "button", class = "sashimi-fullscreen-toggle", "\U26f6 Full screen")),
+            tags$span(id = "sashimi_locus_readout", `data-chrom` = r$chrom,
+                      style = "color:var(--l2b-text); font-weight:600; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;",
+                      sprintf("%s:%s-%s", r$chrom,
+                              format(r$view_start %||% r$start, big.mark = ","),
+                              format(r$view_end %||% r$end, big.mark = ","))),
+            tags$span(style = "color:var(--l2b-text-faint); font-size:11.5px;",
+                      "Drag to pan \U00b7 double-click or \U2318/ctrl+scroll to zoom \U00b7 click a feature to pin")),
+
+        # -- the figure, filling every pixel the strip and dock don't claim --
+        div(class = "l2b-igv-figwrap",
+            div(class = "l2b-sashimi", HTML(sashimi_svg(r, dark = dark_mode())))),
+
+        # -- dock: everything that describes the view, rather than being it --
+        div(class = "l2b-igv-dock",
+          div(class = "l2b-igv-dock-head",
+              tags$button(type = "button", class = "l2b-igv-ghost l2b-igv-dock-toggle", "\U25be Results"),
+              div(class = "l2b-igv-dock-title", "for the window in view"),
+              div(style = "flex:1 1 auto;"),
+              downloadButton("cryptic_download_pdf", "PDF", class = "btn-dl"),
+              downloadButton("cryptic_download_html", "HTML", class = "btn-dl"),
+              downloadButton("cryptic_download_csv", "CSV", class = "btn-dl")),
+          div(class = "l2b-igv-dock-body",
+            uiOutput("cryptic_hero"),
+            tabsetPanel(id = "cryptic_result_tabs", type = "tabs",
+              tabPanel(tagList("Novel junctions (", textOutput("cryptic_n_nj", inline = TRUE), ")"),
+                br(),
+                # value seeded from the current input rather than a hardcoded FALSE:
+                # this card rebuilds on every run, which would otherwise silently
+                # reset the checkbox (and the filter it drives) each time --
+                # isolate() reads the live value without making this renderUI
+                # re-run every time the checkbox itself changes.
+                checkboxInput("cryptic_single_pair_only",
+                              "Localized to one exon pair only (hide junctions that skip a whole annotated exon)",
+                              value = isolate(input$cryptic_single_pair_only) %||% FALSE),
+                DTOutput("cryptic_junc_tbl"),
+                p(class = "l2b-card-sub", "Select a junction row above, then jump straight to the Primer Designer — no manual coordinate entry."),
+                actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;")
+              ),
+              tabPanel(tagList("Candidate exons (", textOutput("cryptic_n_ce", inline = TRUE), ")"),
+                br(),
+                DTOutput("cryptic_exon_tbl"),
+                p(class = "l2b-card-sub", "Select a span row above, then jump straight to the Primer Designer — no manual coordinate entry."),
+                actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;")
+              ),
+              tabPanel(tagList("Retained introns (", textOutput("cryptic_n_ri", inline = TRUE), ")"),
+                br(),
+                p(class = "l2b-card-sub",
+                  "Elevated intronic coverage in knockdown, found by scanning each intron at base resolution -- this catches BOTH a fully retained intron (reads pile up across the whole thing instead of being spliced out) AND a cryptic exon buried deep inside a large intron whose own splice junctions are too weak to call (a localized coverage bump the junction tabs can't see). Each row's coordinates are the localized elevated segment. Scored by the intron-retention ratio (segment coverage relative to the gene's exonic level), so it's independent of sequencing depth and expression. TDP-43 loss causes widespread intron retention, so seeing several here is expected -- not necessarily each its own distinct event."),
+                DTOutput("cryptic_retention_tbl"),
+                div(style = "margin-top:10px;", downloadButton("cryptic_download_retention_csv", "Download retained introns (CSV)", class = "btn-dl"))
+              ),
+              tabPanel(tagList("Differential splicing (", textOutput("cryptic_n_ds", inline = TRUE), ")"),
+                br(),
+                p(class = "l2b-card-sub",
+                  sprintf(paste0("%d control / %d knockdown replicate(s). PSI = junction reads ÷ reads across all ",
+                                 "junctions sharing its donor or acceptor site (an intron cluster); p-values are a ",
+                                 "per-junction Fisher's exact test on that 2×2 table, FDR-adjusted (q). This is a ",
+                                 "lighter-weight V1 -- a real replicate-variance model (as LeafCutter uses) is future work."),
+                          r$control$n_replicates %||% 1L, r$knockdown$n_replicates %||% 1L)),
+                DTOutput("cryptic_diff_tbl"),
+                div(style = "margin-top:10px;", downloadButton("cryptic_download_diff_csv", "Download differential splicing (CSV)", class = "btn-dl"))
+              )
+            ),
+            div(class = "l2b-card", style = "margin-top:14px;",
+              div(class = "l2b-card-title", "\U0001f9e0 Interpret with a local model"),
+              p(class = "l2b-card-sub",
+                "Runs fully on your machine via Ollama (qwen3:8b). Grounded in the numbers above; PubMed context is used only as attributed background. Assistance, not proof — verify candidates by eye and RT-PCR."),
+              uiOutput("cryptic_interp_out")
+            ),
+            div(class = "l2b-fig-cap",
+                "Coverage wiggles (control blue, knockdown orange) share one depth scale; arcs are splice junctions, thickness and height scaled by supporting reads and labelled with the count. Novel junctions are drawn in red. Panning and zooming are instant and stay on this machine; the figure is drawn from a window wider than the screen, and reads are re-fetched only when you reach the edge of it or zoom in past the resolution it can honestly show. The tables above always describe the window currently in view.")
           )
         )
-      ),
-      div(class = "l2b-card",
-        div(class = "l2b-card-title", "\U0001f9e0 Interpret with a local model"),
-        p(class = "l2b-card-sub",
-          "Runs fully on your machine via Ollama (qwen3:8b). Grounded in the numbers above; PubMed context is used only as attributed background. Assistance, not proof — verify candidates by eye and RT-PCR."),
-        uiOutput("cryptic_interp_out")
       )
     )
   })

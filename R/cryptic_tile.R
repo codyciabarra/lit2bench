@@ -279,5 +279,13 @@ cryptic_view_results <- function(bundle, chrom, label, view_start, view_end, thr
   res$orig_start <- fig$orig_start; res$orig_end <- fig$orig_end
   res$tile_start <- bundle$start; res$tile_end <- bundle$end
 
+  # The gene track must name the transcript the TABLES are about. Both halves
+  # pick a primary transcript independently, and over a 3x buffer that is often a
+  # different gene from the one in view -- asking for GAPDH and being shown a
+  # neighbouring accession on the gene track is worse than showing none. The view
+  # is the authority; the figure follows it.
+  fig$transcript <- res$transcript
+  fig$n_other_isoforms <- res$n_other_isoforms
+
   list(figure = fig, view = res)
 }
