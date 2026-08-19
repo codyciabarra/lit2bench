@@ -170,7 +170,7 @@ SASHIMI_DARK_COL <- list(
 .track_svg <- function(bins, junctions, gx, gx_lo, gx_hi, x_left, x_right, y_top, arc_h, cov_h,
                        label, n_reads, max_depth, max_reads, col, fill, line, arc_col,
                        novel_keys = character(0), bp_start = NULL, bp_end = NULL,
-                       px_per_bp = 1) {
+                       px_per_bp = 1, gutter_x = 8) {
   baseline <- y_top + arc_h + cov_h
   cov_top <- y_top + arc_h
   track_id <- tolower(label)
@@ -199,9 +199,9 @@ SASHIMI_DARK_COL <- list(
 
   # IGV-style range tag + sample label -- pinned to the gutters, so they carry no
   # data-bp and stay put while the genome scrolls underneath them.
-  L <- c(L, .lbl(x_left + 2, y_top + arc_h - 6, sprintf("[0 - %s]", format(round(max_depth), big.mark = ",")),
-                 `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", `font-size` = "11", fill = col$faint))
-  L <- c(L, .lbl(x_left + 2, y_top + 14, label, `font-size` = "14", `font-weight` = "700", fill = col$ink))
+  L <- c(L, .lbl(gutter_x, y_top + 30, label, `font-size` = "13", `font-weight` = "700", fill = col$ink))
+  L <- c(L, .lbl(gutter_x, y_top + 46, sprintf("[0 - %s]", format(round(max_depth), big.mark = ",")),
+                 `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", `font-size` = "10.5", fill = col$faint))
   L <- c(L, .lbl(x_right, y_top + 14, sprintf("%s reads", format(n_reads, big.mark = ",")),
                  `text-anchor` = "end", `font-size` = "11.5", fill = col$muted))
 
@@ -343,7 +343,7 @@ SASHIMI_DARK_COL <- list(
 # because the round numbers themselves change as you zoom -- a ruler that
 # panned its old labels along would be worse than no ruler.
 # --------------------------------------------------------------------------
-.axis_svg <- function(chrom, start, end, gx, x_left, x_right, y_top, col, px_per_bp = 1) {
+.axis_svg <- function(chrom, start, end, gx, x_left, x_right, y_top, col, px_per_bp = 1, gutter_x = 8) {
   s <- character(0); L <- character(0)
   s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
                      gx(start), y_top, gx(end), y_top, col$muted))
@@ -356,7 +356,7 @@ SASHIMI_DARK_COL <- list(
                    class = "sashimi-ticklabel", `text-anchor` = "middle", `font-size` = "10.5",
                    `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", fill = col$muted))
   }
-  L <- c(L, .lbl(x_left, y_top + 20, chrom, `font-size` = "11.5", `font-weight` = "600", fill = col$ink))
+  L <- c(L, .lbl(gutter_x, y_top + 20, chrom, `font-size` = "11.5", `font-weight` = "600", fill = col$ink))
   list(geom = paste(s, collapse = ""), labels = paste(L, collapse = ""))
 }
 
@@ -375,7 +375,14 @@ sashimi_svg <- function(result, dark = FALSE) {
   # an inline pixel width, breaking out of that 100% squish.
   n_junctions <- max(nrow(result$control$junctions), nrow(result$knockdown$junctions))
   W <- max(1240, min(6000, round(n_junctions * 44)))
-  LEFT <- 62; RIGHT <- 26
+  # LEFT is a real gutter, not padding. Track names, the [0 - max] range tag and
+  # the chromosome sit in it, OUTSIDE the clipped data panel, so nothing the
+  # genome layer draws can ever cross them. Before tiling that was survivable:
+  # every arc was fully inside the window, so it never reached the gutter. A
+  # buffered render draws arcs that continue off-screen -- which is the point,
+  # you can see what you are panning towards -- and those swept straight through
+  # the range tag and the track name.
+  LEFT <- 98; RIGHT <- 26; GUTTER_X <- 8
   PAD_TOP <- 20; ARC_H <- 96; COV_H <- 118; TRACK_LBL <- 4
   GAP <- 26; GENE_H <- 74; AXIS_H <- 30
   x_left <- LEFT; x_right <- W - RIGHT
@@ -444,12 +451,12 @@ sashimi_svg <- function(result, dark = FALSE) {
 
   # panel backdrop -- pixel space, outside the geometry layer, so it stays put
   s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="8" fill="%s" stroke="%s"/>',
-                    x_left - 10, PAD_TOP - 12, (x_right - x_left) + 20, H - PAD_TOP + 6, COL$panel, COL$panel_edge))
+                    x_left, PAD_TOP - 12, x_right - x_left, H - PAD_TOP + 6, COL$panel, COL$panel_edge))
 
   # clip the genome layer to the drawing region, so panned-in features can't
   # spill over the gutters where the pinned labels live
   s <- c(s, sprintf('<defs><clipPath id="sashimi-clip"><rect x="%.1f" y="%.1f" width="%.1f" height="%.1f"/></clipPath></defs>',
-                    x_left - 8, PAD_TOP - 10, (x_right - x_left) + 16, H - PAD_TOP + 2))
+                    x_left, PAD_TOP - 10, x_right - x_left, H - PAD_TOP + 2))
 
   g <- character(0); L <- character(0); U <- character(0)
 
@@ -467,12 +474,13 @@ sashimi_svg <- function(result, dark = FALSE) {
   ctrl <- .track_svg(result$control$coverage, result$control$junctions, gx, gx_lo, gx_hi,
                      x_left, x_right, y_ctrl, ARC_H, COV_H, "Control", result$control$n_reads,
                      max_depth, max_reads, COL, COL$ctrl_fill, COL$ctrl_line, COL$ctrl_arc,
-                     bp_start = result$start, bp_end = result$end, px_per_bp = px_per_bp)
+                     bp_start = result$start, bp_end = result$end, px_per_bp = px_per_bp,
+                     gutter_x = GUTTER_X)
   kdt <- .track_svg(result$knockdown$coverage, result$knockdown$junctions, gx, gx_lo, gx_hi,
                     x_left, x_right, y_kd, ARC_H, COV_H, "Knockdown", result$knockdown$n_reads,
                     max_depth, max_reads, COL, COL$kd_fill, COL$kd_line, COL$kd_arc,
                     novel_keys = novel_keys, bp_start = result$start, bp_end = result$end,
-                    px_per_bp = px_per_bp)
+                    px_per_bp = px_per_bp, gutter_x = GUTTER_X)
   g <- c(g, ctrl$geom, kdt$geom); L <- c(L, ctrl$labels, kdt$labels)
 
   if (!is.null(result$transcript)) {
@@ -485,7 +493,7 @@ sashimi_svg <- function(result, dark = FALSE) {
                    `font-size` = "12", fill = COL$muted))
   }
   ax <- .axis_svg(result$chrom, result$start, result$end, gx, x_left, x_right, y_axis, COL,
-                  px_per_bp = px_per_bp)
+                  px_per_bp = px_per_bp, gutter_x = GUTTER_X)
   g <- c(g, ax$geom); L <- c(L, ax$labels)
 
   # NOTE: the clip lives on an OUTER, untransformed <g>, not on the geometry
