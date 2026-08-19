@@ -402,14 +402,25 @@ junction_table <- function(galn, min_reads = 1, start = NULL, end = NULL) {
 #' Returns the base-resolution coverage Rle alongside the binned figure
 #' coverage so intron detection can scan at full resolution (localized cryptic
 #' exons within a large intron are invisible to a coarse whole-window bin).
+#' @param keep_reads also return this window's read intervals as two sorted
+#'        integer vectors. Only the tile layer (cryptic_tile.R) asks for them:
+#'        they are what lets a sub-window's read count be counted EXACTLY from
+#'        an already-read buffer instead of re-reading the BAM, and they cost
+#'        8 bytes per read -- far less than the GAlignments object this
+#'        function already materializes and discards on every call.
 bam_track_data <- function(bam_path, chrom, start, end, n_bins = 800, min_reads = 1,
-                            index_stem = bam_path) {
+                            index_stem = bam_path, keep_reads = FALSE) {
   galn <- read_region(bam_path, chrom, start, end, index_stem = index_stem)
   rle_win <- window_coverage_rle(galn, chrom, start, end)
-  list(coverage = bin_coverage(rle_win, n_bins = n_bins),
-       coverage_rle = rle_win,
-       junctions = junction_table(galn, min_reads = min_reads, start = start, end = end),
-       n_reads = length(galn))
+  out <- list(coverage = bin_coverage(rle_win, n_bins = n_bins),
+              coverage_rle = rle_win,
+              junctions = junction_table(galn, min_reads = min_reads, start = start, end = end),
+              n_reads = length(galn))
+  if (isTRUE(keep_reads)) {
+    out$read_starts <- sort(as.integer(BiocGenerics::start(galn)))
+    out$read_ends <- sort(as.integer(BiocGenerics::end(galn)))
+  }
+  out
 }
 
 #' Replicate-aware version of bam_track_data(): reads every replicate BAM for
@@ -429,9 +440,10 @@ bam_track_data <- function(bam_path, chrom, start, end, n_bins = 800, min_reads 
 #' @param index_stems optional per-BAM `index=` stems (see read_region); the
 #'        default assumes the "<bam>.bai" convention for every path.
 bam_track_data_multi <- function(bam_paths, chrom, start, end, n_bins = 800, min_reads = 1,
-                                  index_stems = bam_paths) {
+                                  index_stems = bam_paths, keep_reads = FALSE) {
   read_one <- function(i) bam_track_data(bam_paths[i], chrom, start, end, n_bins = n_bins,
-                                          min_reads = 0, index_stem = index_stems[i])
+                                          min_reads = 0, index_stem = index_stems[i],
+                                          keep_reads = keep_reads)
   idx <- seq_along(bam_paths)
   per_rep <- if (length(bam_paths) > 1 && .Platform$OS.type == "unix") {
     # detectCores() is NA when it can't tell; never let that reach mc.cores
@@ -463,10 +475,17 @@ bam_track_data_multi <- function(bam_paths, chrom, start, end, n_bins = 800, min
     rownames(pooled_j) <- NULL
   }
 
-  list(coverage = pooled_cov, coverage_rle = pooled_rle, junctions = pooled_j,
-       n_reads = sum(vapply(per_rep, function(r) r$n_reads, numeric(1))),
-       n_replicates = length(bam_paths),
-       per_replicate = lapply(per_rep, function(r) r$junctions))
+  out <- list(coverage = pooled_cov, coverage_rle = pooled_rle, junctions = pooled_j,
+              n_reads = sum(vapply(per_rep, function(r) r$n_reads, numeric(1))),
+              n_replicates = length(bam_paths),
+              per_replicate = lapply(per_rep, function(r) r$junctions))
+  # Pooled read intervals: n_reads is a SUM across replicates, so overlap
+  # counting on the pooled vectors reproduces it exactly for any sub-window.
+  if (isTRUE(keep_reads)) {
+    out$read_starts <- sort(unlist(lapply(per_rep, function(r) r$read_starts), use.names = FALSE))
+    out$read_ends <- sort(unlist(lapply(per_rep, function(r) r$read_ends), use.names = FALSE))
+  }
+  out
 }
 
 # --------------------------------------------------------------------------
@@ -1167,45 +1186,12 @@ build_cryptic_result <- function(locus, control_track, kd_track, transcripts, ca
 # @return the figure-ready result, as build_cryptic_result() plus
 #         $differential and $thresholds (set by callers previously, now here).
 run_cryptic_detection <- function(locus, control_bams, kd_bams, assembly, thresholds, cache) {
-  transcripts <- cached_transcripts(cache, locus$chrom, locus$start, locus$end, assembly = assembly)
-
-  control_track <- cached_track_data(cache, control_bams$paths, locus$chrom, locus$start, locus$end,
-                                      index_stems = control_bams$index_stems)
-  kd_track <- cached_track_data(cache, kd_bams$paths, locus$chrom, locus$start, locus$end,
-                                 index_stems = kd_bams$index_stems)
-
-  window_seq <- cached_genomic_seq(cache, locus$chrom, locus$start, locus$end, assembly = assembly)
-
-  known_junc <- known_junctions_from_transcripts(transcripts)
-  known_exons <- known_exons_from_transcripts(transcripts)
-  candidates <- detect_cryptic_candidates(
-    control_track$junctions, kd_track$junctions, known_junc,
-    min_kd_reads = thresholds$min_kd_reads, max_control_reads = thresholds$max_control_reads,
-    exon_len_range = c(thresholds$exon_min, thresholds$exon_max),
-    window_seq = window_seq, window_seq_start = locus$start, known_exons = known_exons)
-  # Differential splicing, like the cryptic calls above, is meaningless without
-  # a reference splicing program: with no annotated introns (chrM, single-exon,
-  # intergenic) every "junction" is an artifact, so skip it rather than report
-  # PSI shifts among noise.
-  diff_tbl <- if (nrow(known_junc) == 0) differential_splicing_table(list(), list(), known_junc)
-              else differential_splicing_table(control_track$per_replicate, kd_track$per_replicate, known_junc)
-  retained_introns <- detect_intron_retention(
-    control_track$coverage_rle, kd_track$coverage_rle, locus$start, locus$end, known_junc,
-    control_n_reads = control_track$n_reads, kd_n_reads = kd_track$n_reads,
-    known_exons = known_exons)
-
-  res <- build_cryptic_result(locus, control_track, kd_track, transcripts, candidates)
-  res$differential <- diff_tbl
-  res$retained_introns <- retained_introns
-  res$thresholds <- thresholds
-
-  # exons_skipped is computed against the SAME primary transcript
-  # build_cryptic_result() just picked (res$transcript) -- that's the one
-  # whose exon numbering matches what a user's own reference table (exon N
-  # to exon N+/-1) is written against, so this has to run after, not before,
-  # that selection.
-  exon_tbl <- if (!is.null(res$transcript)) res$transcript[, c("start", "end")] else NULL
-  res$candidates$novel_junctions <- .annotate_exons_skipped(res$candidates$novel_junctions, exon_tbl)
-  res$candidates$candidate_exons <- .annotate_exons_skipped(res$candidates$candidate_exons, exon_tbl)
-  res
+  # Delegated to the tile layer (R/cryptic_tile.R) with the buffer set to the
+  # locus itself, so this is the identity case: one read of exactly this window,
+  # sliced to exactly this window. That is deliberate -- it means the tiled path
+  # the viewer navigates with is the SAME code this has always run, exercised on
+  # every single run rather than only when someone pans, so the two cannot drift.
+  bundle <- build_tile_bundle(locus$chrom, locus$start, locus$end,
+                              control_bams, kd_bams, assembly, cache)
+  run_cryptic_detection_tiled(bundle, locus, thresholds)
 }
