@@ -1374,6 +1374,17 @@ SASHIMI_JS <- "
       document.body.classList.remove('l2b-nav-open');
     }
   });
+  // These classes live on <body> so the drawer and the nav overlay can be styled
+  // without reaching into the panel, which means they outlive the panel unless
+  // something clears them: leave the tool with the drawer open and it is still
+  // open when you come back, having never been visible in between.
+  var toolWatch = new MutationObserver(function(){
+    if (document.body.getAttribute('data-tool') !== 'cryptic') {
+      document.body.classList.remove('l2b-igv-drawer-open', 'l2b-nav-open');
+    }
+  });
+  if (document.body) toolWatch.observe(document.body, { attributes: true, attributeFilter: ['data-tool'] });
+
   document.addEventListener('keydown', function(e){
     if (e.key !== 'Escape') return;
     if (document.body.classList.contains('l2b-igv-drawer-open')) {

@@ -420,9 +420,17 @@ L2B_CSS <- "
      which is the link that is easy to miss -- without it .l2b-igv measured 1323px
      inside a 925px column and the drawer stopped halfway down the screen. */
   body[data-tool='cryptic'] .l2b-col-main { height:100%; min-height:0; }
+  /* Child combinators all the way down, deliberately. A descendant selector here
+     (.tab-content, .tab-pane.active) also matches the NESTED tabsets inside other
+     panels -- Primer & Schematic and Methods & Ordering both have one, and the
+     Cryptic panel has its own results tabset -- handing height:100% to elements
+     that must size to their content. It has no visible effect while those
+     ancestors are hidden, which is exactly what makes it the kind of bug that
+     surfaces months later. Only the outer tab chain should stretch. */
   body[data-tool='cryptic'] .l2b-col-main > .tabbable,
-  body[data-tool='cryptic'] .tab-content,
-  body[data-tool='cryptic'] .tab-pane.active { height:100%; min-height:0; }
+  body[data-tool='cryptic'] .l2b-col-main > .tabbable > .tab-content,
+  body[data-tool='cryptic'] .l2b-col-main > .tabbable > .tab-content > .tab-pane.active {
+    height:100%; min-height:0; }
 
   .l2b-igv { height:100%; display:grid; grid-template-rows:auto minmax(0,1fr); position:relative; }
 
