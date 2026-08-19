@@ -85,6 +85,24 @@ server_cryptic <- function(input, output, session, ctx) {
   # at a new window without re-resolving or re-materializing the BAMs
   cryptic_bam_info <- reactiveVal(NULL)
 
+  # Viewer state. Three things, and the split between them is what lets the
+  # figure stay live while the numbers under it stay honest:
+  #
+  #   figstate     a plain environment, NOT a reactive, holding the buffered
+  #                result the SVG is drawn from plus the window the client is
+  #                currently showing. Deliberately non-reactive: a tile is
+  #                swapped into the DOM by SASHIMI_JS, and if this were reactive
+  #                the results card would ALSO re-render underneath it, throwing
+  #                away the pinned tooltip, the filter and the user's scroll.
+  #                Kept only so a theme toggle can redraw at the current view.
+  #   cryptic_res  the result for the window on screen -- what the tables, the
+  #                hero stats, the exports and the interpretation all read.
+  #   cryptic_fig  bumped ONLY by a genuine new run, which is the one time the
+  #                whole card should be rebuilt from scratch.
+  figstate <- new.env(parent = emptyenv())
+  figstate$result <- NULL; figstate$view <- NULL
+  cryptic_fig <- reactiveVal(NULL)
+
   cryptic_resolve_bams <- function(label) {
     workdir <- file.path(tempdir(), paste0("cryptic_", session$token))
     if (identical(input$cryptic_bam_source, "path")) {
@@ -124,13 +142,25 @@ server_cryptic <- function(input, output, session, ctx) {
                            max_control_reads = input$cryptic_max_ctrl_reads,
                            exon_min = input$cryptic_exon_min, exon_max = input$cryptic_exon_max)
         incProgress(0.3, detail = "detecting + building figure")
-        res <- run_cryptic_detection(locus, control_bams, kd_bams, input$cryptic_assembly,
-                                     thresholds, cryptic_cache)
-        # the "full view" a double-click zoom / reset can always get back to
-        res$orig_start <- locus$start; res$orig_end <- locus$end
+        # Read a BUFFER, not just the requested window: the margin either side is
+        # what panning and zooming move into without going back to the BAMs.
+        buf <- tile_span_for(locus$start, locus$end)
+        bundle <- build_tile_bundle(locus$chrom, buf$start, buf$end,
+                                    control_bams, kd_bams, input$cryptic_assembly, cryptic_cache)
+        out <- cryptic_view_results(bundle, locus$chrom, locus$label,
+                                    locus$start, locus$end, thresholds,
+                                    # the "full view" reset always returns to
+                                    orig_start = locus$start, orig_end = locus$end)
+        res <- out$view
+        figstate$result <- out$figure
+        figstate$view <- list(start = locus$start, end = locus$end)
+        figstate$bundle <- bundle
+        figstate$thresholds <- thresholds
+        figstate$label <- locus$label
 
         cryptic_bam_info(list(control = control_bams, kd = kd_bams, assembly = input$cryptic_assembly))
         cryptic_res(res)
+        cryptic_fig(out$figure)
         cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
 
         # What the run *was* and what it found. The locus width goes in but the
@@ -150,45 +180,123 @@ server_cryptic <- function(input, output, session, ctx) {
     })
   })
 
-  # -- IGV-style zoom: double-click a point in the plot, or the zoom
-  # in/out/reset buttons (all client-side, SASHIMI_JS) -- to re-run detection
-  # at a new window. No withProgress here: unlike the initial run, this reads
-  # an already-resolved, already-indexed BAM over what's usually a *narrower*
-  # window, through the same cache, so it's fast enough that Shiny's default
-  # "recalculating" dimming on uiOutput is feedback enough.
-  observeEvent(input$cryptic_zoom_to, {
-    req(cryptic_res(), cryptic_bam_info())
-    prev <- cryptic_res(); bams <- cryptic_bam_info()
-    tgt <- input$cryptic_zoom_to
-    new_start <- max(1, round(as.numeric(tgt$start)))
-    new_end <- max(new_start + 1, round(as.numeric(tgt$end)))
-    locus <- list(chrom = prev$chrom, start = new_start, end = new_end, label = prev$label)
+  # ------------------------------------------------------------------------
+  # TILES AND SETTLE -- the only two things navigation still asks the server for.
+  #
+  # Panning and zooming themselves never come here: SASHIMI_JS moves the view by
+  # writing one transform (see R/sashimi_plot.R). These two handle the cases it
+  # genuinely cannot:
+  #
+  #   cryptic_tile_request   the view is approaching the edge of the rendered
+  #                          span, or has zoomed in past the resolution the
+  #                          current bins honestly support. Answered with a new
+  #                          SVG pushed straight to the client, NOT a re-render:
+  #                          a renderUI here would rebuild the card and destroy
+  #                          the pin, the filter and the view itself.
+  #   cryptic_view_settled   the view stopped moving. Recompute the tables and
+  #                          hero stats for the window now on screen. Pure
+  #                          arithmetic over the already-read tile -- no BAM
+  #                          read, no network -- so the numbers keep meaning
+  #                          "what is in view".
+  #
+  # TOKENS. Every request carries one, and the reply carries it back. The client
+  # drops a reply whose token is not the newest it issued, so a fast drag that
+  # outruns the server renders the newest tile and silently discards the rest --
+  # no flicker, no error, and never an older window painted over a newer one.
+  # Note what is NOT logged here: l2b_log() gets counts and durations, never the
+  # window, because a window is a locus and a locus names an experiment.
+  # ------------------------------------------------------------------------
+
+  #' The bundle covering `view`, reusing the loaded one when it already does.
+  #' Only the miss path touches a BAM.
+  cryptic_bundle_for <- function(view_start, view_end) {
+    b <- figstate$bundle
+    if (tile_covers(b, view_start, view_end)) return(b)
+    bams <- cryptic_bam_info()
+    buf <- tile_span_for(view_start, view_end)
+    build_tile_bundle(figstate$result$chrom, buf$start, buf$end,
+                      bams$control, bams$kd, bams$assembly, cryptic_cache)
+  }
+
+  observeEvent(input$cryptic_tile_request, {
+    req(figstate$result, cryptic_bam_info())
+    tgt <- input$cryptic_tile_request
+    vs <- max(1, round(as.numeric(tgt$start)))
+    ve <- max(vs + 1, round(as.numeric(tgt$end)))
+    t0 <- Sys.time()
     tryCatch({
-      res <- run_cryptic_detection(locus, bams$control, bams$kd, bams$assembly, prev$thresholds, cryptic_cache)
-      res$orig_start <- prev$orig_start %||% prev$start
-      res$orig_end <- prev$orig_end %||% prev$end
-      cryptic_res(res)
-      cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
+      bundle <- cryptic_bundle_for(vs, ve)
+      prev <- figstate$result
+      out <- cryptic_view_results(bundle, prev$chrom, figstate$label, vs, ve,
+                                  figstate$thresholds,
+                                  orig_start = prev$orig_start, orig_end = prev$orig_end)
+      figstate$bundle <- bundle
+      figstate$result <- out$figure
+      figstate$view <- list(start = vs, end = ve)
+      cryptic_res(out$view)
+      session$sendCustomMessage("sashimiTile", list(
+        token = tgt$token,
+        svg = sashimi_svg(out$figure, dark = dark_mode())))
+      l2b_log("tile", tool = "cryptic",
+              width_kb = round((ve - vs) / 1000, 1),
+              cached = tile_covers(figstate$bundle, vs, ve),
+              secs = round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 2))
     }, error = function(e) cryptic_err(conditionMessage(e)))
   })
 
+  observeEvent(input$cryptic_view_settled, {
+    req(figstate$bundle, figstate$result)
+    tgt <- input$cryptic_view_settled
+    vs <- max(1, round(as.numeric(tgt$start)))
+    ve <- max(vs + 1, round(as.numeric(tgt$end)))
+    if (!tile_covers(figstate$bundle, vs, ve)) return(invisible())
+    tryCatch({
+      prev <- figstate$result
+      locus <- list(chrom = prev$chrom, start = vs, end = ve, label = figstate$label)
+      res <- run_cryptic_detection_tiled(figstate$bundle, locus, figstate$thresholds)
+      res$orig_start <- prev$orig_start; res$orig_end <- prev$orig_end
+      res$tile_start <- figstate$bundle$start; res$tile_end <- figstate$bundle$end
+      figstate$view <- list(start = vs, end = ve)
+      cryptic_res(res)
+    }, error = function(e) cryptic_err(conditionMessage(e)))
+  })
+
+  # The hero stats describe the window ON SCREEN, so they hang off cryptic_res()
+  # and update when the view settles -- separately from the card around them,
+  # which must not be rebuilt while the user is navigating inside it.
+  output$cryptic_hero <- renderUI({
+    r <- cryptic_res(); req(r)
+    n_nj <- nrow(r$candidates$novel_junctions); n_ce <- nrow(r$candidates$candidate_exons)
+    gene_lbl <- if (!is.null(r$transcript)) r$transcript$name[1] else "—"
+    l2b_hero(
+      l2b_stat("Region", r$label, sprintf("%s · %.1f kb", r$chrom, (r$end - r$start) / 1000)),
+      l2b_stat("Transcript", gene_lbl, if (r$n_other_isoforms > 0) sprintf("+%d more isoforms", r$n_other_isoforms) else "single isoform"),
+      l2b_stat("Novel junctions", n_nj, "in KD, not annotated", if (n_nj > 0) "accent" else ""),
+      l2b_stat("Candidate exons", n_ce, "paired novel junctions", if (n_ce > 0) "bad" else "good")
+    )
+  })
+  # Live counts for the tab titles, same reason.
+  output$cryptic_n_nj <- renderText(nrow(cryptic_res()$candidates$novel_junctions))
+  output$cryptic_n_ce <- renderText(nrow(cryptic_res()$candidates$candidate_exons))
+  output$cryptic_n_ri <- renderText(nrow(cryptic_res()$retained_introns))
+  output$cryptic_n_ds <- renderText(nrow(cryptic_res()$differential))
+
+  # The card itself is rebuilt ONLY on a genuine new run (cryptic_fig) or a
+  # theme change. It deliberately reads figstate$result rather than cryptic_fig()
+  # for its content: cryptic_fig is the invalidation signal, figstate holds the
+  # figure as it stands NOW, including any tiles panned to since the run -- so a
+  # theme toggle redraws where the user is looking, not where they started.
   output$cryptic_out <- renderUI({
     if (!is.null(cryptic_err())) return(div(class = "l2b-card", l2b_err(cryptic_err())))
-    if (is.null(cryptic_res())) return(div(class = "l2b-card",
+    cryptic_fig()
+    if (is.null(figstate$result)) return(div(class = "l2b-card",
       l2b_empty("\U0001f52c", "No scan yet", "Enter a locus, upload both BAMs, and click Run detection.")))
-    r <- cryptic_res()
-    n_nj <- nrow(r$candidates$novel_junctions); n_ce <- nrow(r$candidates$candidate_exons)
-    n_ri <- nrow(r$retained_introns)
-    gene_lbl <- if (!is.null(r$transcript)) r$transcript$name[1] else "—"
+    r <- figstate$result
+    if (!is.null(figstate$view)) { r$view_start <- figstate$view$start; r$view_end <- figstate$view$end }
     max_j_reads <- max(1, r$control$junctions$reads, r$knockdown$junctions$reads)
     tagList(
       div(class = "l2b-card",
-        l2b_hero(
-          l2b_stat("Region", r$label, sprintf("%s · %.1f kb", r$chrom, (r$end - r$start) / 1000)),
-          l2b_stat("Transcript", gene_lbl, if (r$n_other_isoforms > 0) sprintf("+%d more isoforms", r$n_other_isoforms) else "single isoform"),
-          l2b_stat("Novel junctions", n_nj, "in KD, not annotated", if (n_nj > 0) "accent" else ""),
-          l2b_stat("Candidate exons", n_ce, "paired novel junctions", if (n_ce > 0) "bad" else "good")
-        ),
+        uiOutput("cryptic_hero"),
         div(style = "display:flex; flex-direction:column; gap:10px; margin-bottom:10px; padding:12px 14px; background:var(--l2b-surface-2); border:1px solid var(--l2b-border); border-radius:10px;",
             div(style = "display:flex; gap:24px; align-items:center; flex-wrap:wrap;",
                 div(style = "flex:1 1 240px;",
@@ -207,19 +315,24 @@ server_cryptic <- function(input, output, session, ctx) {
                     div(class = "l2b-sashimi-toolbar-sep"),
                     tags$button(type = "button", class = "sashimi-expand-toggle", "⤢ Expand view"),
                     tags$button(type = "button", class = "sashimi-fullscreen-toggle", "⛶ Full screen")),
-                div(style = "font-size:11.5px; color:var(--l2b-text-faint); flex:1 1 auto;",
-                    "Hover a feature for detail · click to pin · double-click the plot to zoom in · both filters apply instantly"))),
+                div(style = "font-size:11.5px; color:var(--l2b-text-faint); flex:1 1 auto; display:flex; gap:12px; align-items:center; flex-wrap:wrap;",
+                    tags$span(id = "sashimi_locus_readout", `data-chrom` = r$chrom,
+                              style = "color:var(--l2b-text-muted); font-weight:600;",
+                              sprintf("%s:%s-%s", r$chrom,
+                                      format(r$view_start %||% r$start, big.mark = ","),
+                                      format(r$view_end %||% r$end, big.mark = ","))),
+                    tags$span("Drag to pan · double-click or ⌘/ctrl+scroll to zoom · click a feature to pin it")))),
         div(class = "l2b-sashimi", HTML(sashimi_svg(r, dark = dark_mode()))),
         div(class = "l2b-sashimi-resize-handle", title = "Drag to resize", div(class = "l2b-grip")),
         div(class = "l2b-fig-cap",
-            "Coverage wiggles (control blue, knockdown orange) share one depth scale; arcs are splice junctions, thickness and height scaled by supporting reads and labelled with the count. Novel junctions are drawn in red. Drag the figure to scroll if the region is wide, or drag the handle below it to resize."),
+            "Coverage wiggles (control blue, knockdown orange) share one depth scale; arcs are splice junctions, thickness and height scaled by supporting reads and labelled with the count. Novel junctions are drawn in red. Panning and zooming are instant and stay on this machine; the figure is drawn from a window wider than the screen, and reads are re-fetched only when you reach the edge of it or zoom in past the resolution it can honestly show. The tables below always describe the window currently in view."),
         br(),
         div(style = "display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px;",
             downloadButton("cryptic_download_pdf", "Download PDF figure", class = "btn-dl"),
             downloadButton("cryptic_download_html", "Download HTML figure", class = "btn-dl"),
             downloadButton("cryptic_download_csv", "Download candidates (CSV)", class = "btn-dl")),
         tabsetPanel(id = "cryptic_result_tabs", type = "tabs",
-          tabPanel(sprintf("Novel junctions (%d)", n_nj),
+          tabPanel(tagList("Novel junctions (", textOutput("cryptic_n_nj", inline = TRUE), ")"),
             br(),
             # value seeded from the current input rather than a hardcoded FALSE:
             # this whole card (output$cryptic_out) is one renderUI that rebuilds
@@ -234,20 +347,20 @@ server_cryptic <- function(input, output, session, ctx) {
             p(class = "l2b-card-sub", "Select a junction row above, then jump straight to the Primer Designer — no manual coordinate entry."),
             actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;")
           ),
-          tabPanel(sprintf("Candidate exons (%d)", n_ce),
+          tabPanel(tagList("Candidate exons (", textOutput("cryptic_n_ce", inline = TRUE), ")"),
             br(),
             DTOutput("cryptic_exon_tbl"),
             p(class = "l2b-card-sub", "Select a span row above, then jump straight to the Primer Designer — no manual coordinate entry."),
             actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;")
           ),
-          tabPanel(sprintf("Retained introns (%d)", n_ri),
+          tabPanel(tagList("Retained introns (", textOutput("cryptic_n_ri", inline = TRUE), ")"),
             br(),
             p(class = "l2b-card-sub",
               "Elevated intronic coverage in knockdown, found by scanning each intron at base resolution -- this catches BOTH a fully retained intron (reads pile up across the whole thing instead of being spliced out) AND a cryptic exon buried deep inside a large intron whose own splice junctions are too weak to call (a localized coverage bump the junction tabs can't see). Each row's coordinates are the localized elevated segment. Scored by the intron-retention ratio (segment coverage relative to the gene's exonic level), so it's independent of sequencing depth and expression. TDP-43 loss causes widespread intron retention, so seeing several here is expected -- not necessarily each its own distinct event."),
             DTOutput("cryptic_retention_tbl"),
             div(style = "margin-top:10px;", downloadButton("cryptic_download_retention_csv", "Download retained introns (CSV)", class = "btn-dl"))
           ),
-          tabPanel(sprintf("Differential splicing (%d)", nrow(r$differential)),
+          tabPanel(tagList("Differential splicing (", textOutput("cryptic_n_ds", inline = TRUE), ")"),
             br(),
             p(class = "l2b-card-sub",
               sprintf(paste0("%d control / %d knockdown replicate(s). PSI = junction reads ÷ reads across all ",

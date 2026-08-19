@@ -193,11 +193,11 @@ tile_slice_seq <- function(seq, tile_start, start, end) {
 #' Kept as one body with run_cryptic_detection() (which now delegates here) so
 #' the tiled and untiled paths cannot drift apart: there is only one detection
 #' pipeline, and the tile is just where its inputs come from.
-run_cryptic_detection_tiled <- function(bundle, locus, thresholds) {
+run_cryptic_detection_tiled <- function(bundle, locus, thresholds, n_bins = 800) {
   stopifnot(tile_covers(bundle, locus$start, locus$end))
 
-  control_track <- tile_slice_condition(bundle$control, locus$start, locus$end)
-  kd_track <- tile_slice_condition(bundle$kd, locus$start, locus$end)
+  control_track <- tile_slice_condition(bundle$control, locus$start, locus$end, n_bins = n_bins)
+  kd_track <- tile_slice_condition(bundle$kd, locus$start, locus$end, n_bins = n_bins)
   transcripts <- tile_slice_transcripts(bundle$transcripts, locus$start, locus$end)
   window_seq <- tile_slice_seq(bundle$seq, bundle$start, locus$start, locus$end)
 
@@ -232,4 +232,52 @@ run_cryptic_detection_tiled <- function(bundle, locus, thresholds) {
   res$candidates$novel_junctions <- .annotate_exons_skipped(res$candidates$novel_junctions, exon_tbl)
   res$candidates$candidate_exons <- .annotate_exons_skipped(res$candidates$candidate_exons, exon_tbl)
   res
+}
+
+# --------------------------------------------------------------------------
+# What the viewer asks for
+# --------------------------------------------------------------------------
+
+#' Bins to draw a buffered figure with, so the VISIBLE part keeps the same
+#' resolution a direct render of that view would have had.
+#'
+#' Without this the figure is binned across the whole buffer, and the window the
+#' user actually asked for comes back 3x coarser than before tiling -- a silent
+#' quality regression, and one the client would immediately (and correctly) try
+#' to fix by requesting another tile, forever.
+tile_render_bins <- function(bundle_start, bundle_end, view_start, view_end,
+                             per_view = 800, cap = 6000) {
+  span_v <- max(1, view_end - view_start)
+  min(cap, max(per_view, round(per_view * (bundle_end - bundle_start) / span_v)))
+}
+
+#' The two results one view needs, and why there are two:
+#'
+#'   $figure  detection over the WHOLE buffered span, at buffer resolution. This
+#'            is what the SVG is drawn from, and it is deliberately wider than
+#'            the screen -- that off-screen margin is what panning moves into
+#'            without touching the server.
+#'   $view    detection over the window actually on screen. This is what the
+#'            result tables, the hero stats and the exports report, so those
+#'            numbers keep meaning "what I am looking at" rather than "what
+#'            happens to be buffered".
+#'
+#' Both are pure arithmetic over an already-read bundle. Neither reads a BAM.
+cryptic_view_results <- function(bundle, chrom, label, view_start, view_end, thresholds,
+                                 orig_start = NULL, orig_end = NULL) {
+  view_locus <- list(chrom = chrom, start = view_start, end = view_end, label = label)
+  buf_locus <- list(chrom = chrom, start = bundle$start, end = bundle$end, label = label)
+  nb <- tile_render_bins(bundle$start, bundle$end, view_start, view_end)
+
+  fig <- run_cryptic_detection_tiled(bundle, buf_locus, thresholds, n_bins = nb)
+  fig$view_start <- view_start; fig$view_end <- view_end
+  fig$tile_start <- bundle$start; fig$tile_end <- bundle$end
+  fig$orig_start <- orig_start %||% view_start
+  fig$orig_end <- orig_end %||% view_end
+
+  res <- run_cryptic_detection_tiled(bundle, view_locus, thresholds)
+  res$orig_start <- fig$orig_start; res$orig_end <- fig$orig_end
+  res$tile_start <- bundle$start; res$tile_end <- bundle$end
+
+  list(figure = fig, view = res)
 }

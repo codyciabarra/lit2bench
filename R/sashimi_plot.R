@@ -631,8 +631,24 @@ SASHIMI_JS <- "
     display:inline-block; margin-top:6px; color:#8f7dfa; font-weight:600; pointer-events:auto;
   }
   #l2b-sashimi-tooltip a { color:inherit; }
-  .l2b-sashimi { cursor:grab; }
+  .l2b-sashimi { cursor:grab; position:relative; }
   .l2b-sashimi.l2b-sashimi-dragging { cursor:grabbing; user-select:none; }
+  /* Stale-with-spinner, never blank: a tile is fetched while the CURRENT
+     figure stays on screen and stays interactive. Blanking the plot to show a
+     loader would throw away the thing the user is reading in order to tell
+     them it is being improved. */
+  .l2b-sashimi-loading::after {
+    content:'loading finer detail'; position:absolute; top:8px; right:12px;
+    font-size:11px; letter-spacing:.02em; padding:3px 9px; border-radius:999px;
+    background:var(--l2b-glass,rgba(23,28,48,.72)); color:var(--l2b-text,#e9ecf5);
+    border:1px solid var(--l2b-glass-border,rgba(174,182,230,.18));
+    backdrop-filter:blur(10px); pointer-events:none; opacity:.92;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .l2b-sashimi-loading::after { animation:l2bSashimiPulse 1.1s ease-in-out infinite; }
+    @keyframes l2bSashimiPulse { 0%,100%{opacity:.45} 50%{opacity:.95} }
+  }
+  #sashimi_locus_readout { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
   .l2b-sashimi:fullscreen, .l2b-sashimi:-webkit-full-screen {
     display:flex; align-items:center; padding:28px;
     background:var(--l2b-page-bg, var(--l2b-surface, #0b0e1a));
