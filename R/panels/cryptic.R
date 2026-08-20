@@ -371,6 +371,11 @@ server_cryptic <- function(input, output, session, ctx) {
         div(class = "l2b-igv-figwrap",
             div(class = "l2b-sashimi", HTML(sashimi_svg(r, dark = dark_mode())))),
 
+        # Drag this to trade height between the figure and the results, the way
+        # IGV lets you resize its track panel. Persisted, so the balance you
+        # chose survives the next run.
+        div(class = "l2b-igv-splitter", title = "Drag to resize the figure"),
+
         # -- dock: everything that describes the view, rather than being it --
         div(class = "l2b-igv-dock",
           div(class = "l2b-igv-dock-head",

@@ -1098,21 +1098,26 @@ SASHIMI_JS <- "
   // and a tile whose token is not the newest is dropped on arrival without
   // rendering and without an error -- see the message handler below.
   // ----------------------------------------------------------------------
-  var tileToken = 0, tileTimer = null, tilePending = null;
+  var tileToken = 0, tileTimer = null, tilePending = null, lastTileKey = null;
   function needsTile(svg){
     var v = currentView(svg), r = renderWin(svg);
     var span = v.end - v.start, margin = span * 0.25;
     if (v.start - r.start < margin && r.start > 1) return true;
     if (r.end - v.end < margin) return true;
-    // Under-resolved: one coverage bin now covers more than ~2 drawing units,
-    // i.e. the wiggle has visibly become a staircase and is no longer showing
-    // the depth it claims to. Only a re-read at finer bins fixes that -- the
-    // client must never smooth it, because an interpolated coverage track is an
-    // invented measurement. 2x rather than 1x so a figure sitting exactly at
-    // its native resolution doesn't request a tile it doesn't need.
-    var binBp = num(svg,'binBp');
-    var bpPerUnit = span / Math.max(1, num(svg,'xRight') - num(svg,'xLeft'));
-    return binBp > bpPerUnit * 2;
+    // Under-resolved: one coverage bin covers more than ~2 SCREEN PIXELS, i.e.
+    // the wiggle has visibly become a staircase and no longer shows the depth it
+    // claims to. Only a re-read at finer bins fixes that -- the client must never
+    // smooth it, because an interpolated coverage track is an invented measurement.
+    //
+    // Screen pixels, NOT viewBox user units. sashimi_svg() scales the viewBox
+    // width with junction count (up to 6000 units), so a junction-dense locus has
+    // a huge user-space width that no achievable bin count can ever satisfy --
+    // the test stayed true no matter what came back, so the client asked for tile
+    // after tile forever and the 'loading finer detail' badge never cleared. That
+    // was visible on UNC13A, which is exactly the locus this tool exists for.
+    var px = svg.getBoundingClientRect().width;
+    if (!(px > 0)) return false;
+    return num(svg,'binBp') > (span / px) * 2;
   }
   function scheduleTileCheck(svg){
     if (!window.Shiny || !Shiny.setInputValue) return;
@@ -1122,12 +1127,25 @@ SASHIMI_JS <- "
     // than queued, so a fast drag across a gene issues one tile, not thirty
     tileTimer = setTimeout(function(){
       var v = currentView(svg);
+      // Belt and braces against the loop above: a window we have already been
+      // served is never requested again. Without this, any future mistake in
+      // needsTile() becomes an infinite round trip rather than one wasted one.
+      var key = Math.round(v.start) + '-' + Math.round(v.end);
+      if (key === lastTileKey) return;
+      lastTileKey = key;
       tileToken += 1;
       tilePending = tileToken;
       var box = figBox(); if (box) box.classList.add('l2b-sashimi-loading');
       Shiny.setInputValue('cryptic_tile_request',
         { start: Math.round(v.start), end: Math.round(v.end), token: tileToken },
         { priority: 'event' });
+      // The badge is a promise that something is happening. If a reply never
+      // arrives -- dropped as stale, or an error server-side -- clear it rather
+      // than leaving a spinner running over a figure that is not loading.
+      setTimeout(function(){
+        if (tilePending === null) return;
+        var b = figBox(); if (b) b.classList.remove('l2b-sashimi-loading');
+      }, 8000);
     }, 120);
   }
 
@@ -1171,6 +1189,7 @@ SASHIMI_JS <- "
 
   function requestTile(start, end){
     if (!window.Shiny || !Shiny.setInputValue) return;
+    lastTileKey = Math.round(start) + '-' + Math.round(end);
     tileToken += 1; tilePending = tileToken;
     var box = figBox(); if (box) box.classList.add('l2b-sashimi-loading');
     Shiny.setInputValue('cryptic_tile_request',
@@ -1398,6 +1417,49 @@ SASHIMI_JS <- "
     if (e.target.closest && e.target.closest('.l2b-col-nav .btn')) {
       document.body.classList.remove('l2b-nav-open');
     }
+  });
+
+  // ---- the figure/results splitter (IGV's track-panel divider) ----
+  // Sets one CSS variable; the grid does the rest. Persisted in localStorage
+  // like the theme and the old figure height, so the balance survives a reload.
+  function loadDockH(){
+    try { var v = localStorage.getItem('l2b-dock-h'); return v || '32vh'; }
+    catch (e) { return '32vh'; }
+  }
+  function applyDockH(){ document.documentElement.style.setProperty('--l2b-dock-h', loadDockH()); }
+  applyDockH();
+  document.addEventListener('mousedown', function(e){
+    var sp = e.target.closest ? e.target.closest('.l2b-igv-splitter') : null;
+    if (!sp || e.button !== 0) return;
+    e.preventDefault();
+    var work = sp.closest('.l2b-igv-work');
+    var dock = work && work.querySelector('.l2b-igv-dock');
+    if (!dock) return;
+    document.body.classList.remove('l2b-igv-dock-closed');
+    var startY = e.pageY, startH = dock.getBoundingClientRect().height;
+    var maxH = work.getBoundingClientRect().height - 200;   // always leave the figure room
+    document.body.classList.add('l2b-row-resizing');
+    function onMove(e2){
+      var h = Math.max(60, Math.min(maxH, startH - (e2.pageY - startY)));
+      document.documentElement.style.setProperty('--l2b-dock-h', h + 'px');
+    }
+    function onUp(){
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('l2b-row-resizing');
+      try { localStorage.setItem('l2b-dock-h',
+        getComputedStyle(document.documentElement).getPropertyValue('--l2b-dock-h').trim()); } catch (e3) {}
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  // double-click the splitter to give the figure everything
+  document.addEventListener('dblclick', function(e){
+    if (!e.target.closest || !e.target.closest('.l2b-igv-splitter')) return;
+    e.preventDefault();
+    document.body.classList.toggle('l2b-igv-dock-closed');
+    var b = document.querySelector('.l2b-igv-dock-toggle');
+    if (b) b.textContent = (document.body.classList.contains('l2b-igv-dock-closed') ? '▴' : '▾') + ' Results';
   });
 
   // sync the fullscreen button's label + a body class for CSS (exiting via

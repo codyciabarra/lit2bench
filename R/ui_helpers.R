@@ -480,7 +480,20 @@ L2B_CSS <- "
   /* the stage: figure takes everything the dock doesn't */
   .l2b-igv-stage { min-height:0; overflow:hidden; }
   .l2b-igv-stage > .shiny-html-output { height:100%; }
-  .l2b-igv-work { height:100%; display:grid; grid-template-rows:auto minmax(0,1fr) auto; min-height:0; }
+  /* strip / figure / splitter / dock. The figure takes what is left after the
+     dock, and the dock's height is a variable the splitter drags -- IGV's
+     track-panel divider. minmax(140px,1fr) on the figure means the drag can
+     never squeeze the instrument down to nothing. */
+  .l2b-igv-work { height:100%; display:grid; min-height:0;
+    grid-template-rows:auto minmax(140px,1fr) 11px var(--l2b-dock-h, 32vh); }
+  body.l2b-igv-dock-closed .l2b-igv-work { grid-template-rows:auto minmax(140px,1fr) 11px auto; }
+  .l2b-igv-splitter { cursor:row-resize; background:var(--l2b-surface-2);
+    border-top:1px solid var(--l2b-border); border-bottom:1px solid var(--l2b-border);
+    display:flex; align-items:center; justify-content:center; user-select:none; }
+  .l2b-igv-splitter::before { content:''; width:44px; height:3px; border-radius:2px;
+    background:var(--l2b-border-strong); transition:background .15s, width .15s; }
+  .l2b-igv-splitter:hover::before { background:var(--l2b-accent); width:64px; }
+  body.l2b-row-resizing, body.l2b-row-resizing * { cursor:row-resize !important; user-select:none !important; }
   .l2b-igv-figwrap { min-height:0; display:flex; flex-direction:column; padding:12px 16px 12px;
     background:
       radial-gradient(1200px 380px at 18% -10%, rgba(124,108,240,.07), transparent 65%),
@@ -505,9 +518,8 @@ L2B_CSS <- "
   /* The figure is the point, so the dock is capped and scrolls internally rather
      than growing to fit its tables. Collapsing it (the Results button) hands the
      whole stage to the figure. */
-  .l2b-igv-dock { border-top:1px solid var(--l2b-border); background:var(--l2b-surface);
-    max-height:30vh; overflow-y:auto; padding:0 14px 14px; }
-  body.l2b-igv-dock-closed .l2b-igv-dock { max-height:none; overflow:visible; }
+  .l2b-igv-dock { background:var(--l2b-surface); min-height:0; overflow-y:auto; padding:0 14px 14px; }
+  body.l2b-igv-dock-closed .l2b-igv-dock { overflow:visible; }
   body.l2b-igv-dock-closed .l2b-igv-dock-body { display:none; }
   .l2b-igv-dock-head { display:flex; align-items:center; gap:10px; padding:8px 0 6px;
     position:sticky; top:0; background:var(--l2b-surface); z-index:5; flex-wrap:nowrap; }
