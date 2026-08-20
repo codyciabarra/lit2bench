@@ -901,6 +901,7 @@ l2b_topbar <- function() {
         span(class = "l2b-search-icon", "\U0001f50d"),
         tags$input(type = "text", id = "l2b-search", placeholder = "Search tools..."),
         span(class = "l2b-search-kbd", "⌘K")),
+    uiOutput("l2b_update_pill", class = "l2b-update-slot"),
     div(class = "l2b-theme-toggle",
         tags$button(`data-l2b-theme` = "light", title = "Light mode", "☀️"),
         tags$button(`data-l2b-theme` = "dark", title = "Dark mode", "\U0001f319"))

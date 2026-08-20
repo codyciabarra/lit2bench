@@ -40,6 +40,7 @@ options(shiny.maxRequestSize = 10000 * 1024^2)
 source("R/paths.R")
 source("R/usage.R")
 source("R/update_check.R")
+source("R/dev_sync.R")
 source("R/ui_helpers.R")
 source("R/registry.R")
 source("R/ctx.R")
@@ -138,6 +139,24 @@ server <- function(input, output, session) {
       last_tool <<- active
       l2b_log("tool_open", tool = active)
     }
+  })
+
+  # ---- "a newer commit is ready" notice (dev sync only -- see R/dev_sync.R) ----
+  # Polled rather than checked once, because the whole point is commits made
+  # WHILE the app is running. Two minutes is slow enough to be free (one local
+  # git call, time-bounded) and fast enough that you are not left working
+  # against stale code for long. It only ever notifies: applying the update is
+  # quitting and reopening, which is when the launcher syncs.
+  output$l2b_update_pill <- renderUI({
+    invalidateLater(120000, session)
+    st <- tryCatch(l2b_dev_update_status(), error = function(e) NULL)
+    if (is.null(st) || !isTRUE(st$available)) return(NULL)
+    div(class = "l2b-update-pill", title = sprintf(
+      "Running %s; %s is at %s. Quit and reopen Lit2Bench to load it.",
+      st$running, st$branch %||% "the checkout", st$head),
+      span(class = "l2b-update-dot"),
+      sprintf("Update ready \U00b7 %s", st$head),
+      span(class = "l2b-update-hint", "quit & reopen"))
   })
 
   # ======================================================================

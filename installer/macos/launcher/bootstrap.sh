@@ -332,6 +332,10 @@ if [ -z "${LIT2BENCH_NO_DEV_SYNC:-}" ] && [ -f "$DEV_SOURCE_FILE" ]; then
       elif [ "$(cat "$SRC_DIR/.head" 2>/dev/null)" = "$dev_head" ] && [ -f "$SRC_DIR/app.R" ]; then
         log "dev sync: already at $dev_head (${dev_branch:-?})"
         APP_DIR="$SRC_DIR"
+        # The app watches this to notice commits made while it is running, and
+        # says so. It still only NOTIFIES -- applying an update means quitting
+        # and reopening, which is when the sync above runs.
+        export LIT2BENCH_DEV_SOURCE="$DEV_SRC"
       else
         step 3 "Updating Lit2Bench" "Syncing ${dev_branch:-HEAD} @ ${dev_head}…"
         tarball="$SUPPORT/state/devsync.tar"
@@ -346,6 +350,7 @@ if [ -z "${LIT2BENCH_NO_DEV_SYNC:-}" ] && [ -f "$DEV_SOURCE_FILE" ]; then
           rm -rf "$SRC_DIR"
           if mv "$tmp" "$SRC_DIR" 2>/dev/null; then
             APP_DIR="$SRC_DIR"
+            export LIT2BENCH_DEV_SOURCE="$DEV_SRC"
             log "dev sync: updated to $dev_head (${dev_branch:-?})"
           else
             log "dev sync: could not install export -- using bundled source"
