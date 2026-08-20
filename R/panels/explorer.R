@@ -22,6 +22,12 @@ panel_explorer <- function() {
 
 server_explorer <- function(input, output, session, ctx) {
   shared_selected_tx <- ctx$shared_selected_tx   # written here, read by Extractor/Design
+  # Picking a new transcript invalidates whatever the Extractor had fetched for
+  # the previous one. Deferred accessors, not aliases: server_extractor() is
+  # built after this one (TOOLS order), so capturing these at construction time
+  # would grab NULL. See R/ctx.R.
+  extractor_seqs <- function(...) ctx$state$extractor$res(...)
+  extractor_err  <- function(...) ctx$state$extractor$err(...)
 
   # ---- TRANSCRIPT EXPLORER ----
   explorer_res <- reactiveVal(NULL); explorer_err <- reactiveVal(NULL)
