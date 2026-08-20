@@ -139,12 +139,31 @@ server_batch <- function(input, output, session, ctx) {
       return(invisible())
     }
     cryptic_err(NULL)
-    cryptic_bam_info(list(control = br$bam_info$control, kd = br$bam_info$kd, assembly = br$assembly))
-    cryptic_res(res)
-    cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
-    updateSelectInput(session, "cryptic_assembly", selected = br$assembly)
-    updateTextInput(session, "cryptic_locus", value = res$label)
-    updateTabsetPanel(session, "tool_tabs", selected = "cryptic")
+    # Open through the engine's own entry point rather than writing its reactives
+    # from here. Setting cryptic_res() alone used to leave the PREVIOUS locus's
+    # plot on screen beside this locus's tables -- or, on a fresh session, the
+    # "No scan yet" empty state -- because the figure renders from the engine's
+    # figstate, which this never touched. It also left pan/zoom dead, since those
+    # req() a bundle that was never set.
+    #
+    # The reads for this locus are already in the shared cache, but the buffered
+    # span the viewer needs is wider than the window the panel scanned, so this
+    # does pay for one read of the margins.
+    tryCatch({
+      locus <- list(chrom = res$chrom, start = res$start, end = res$end, label = res$label)
+      withProgress(message = sprintf("Opening %s...", res$label), value = 0.4, {
+        ctx$state$cryptic$open(locus, br$bam_info$control, br$bam_info$kd,
+                               br$assembly, res$thresholds)
+      })
+      updateSelectInput(session, "cryptic_assembly", selected = br$assembly)
+      updateTextInput(session, "cryptic_locus", value = res$label)
+      updateTabsetPanel(session, "tool_tabs", selected = "cryptic")
+    }, error = function(e) batch_err(conditionMessage(e)))
+
+    # DT toggles a selected row OFF when you click it again, so re-opening the
+    # locus you just looked at silently did nothing. Clearing the selection makes
+    # the next click a fresh selection, which fires.
+    DT::selectRows(DT::dataTableProxy("batch_tbl"), NULL)
   })
 
   output$batch_download_csv <- l2b_dl("batch_download_csv",

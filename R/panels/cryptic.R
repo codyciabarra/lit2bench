@@ -160,6 +160,34 @@ server_cryptic <- function(input, output, session, ctx) {
     }
   }
 
+  # Adopting a locus into the viewer means setting figstate AND cryptic_res
+  # together. They are two halves of one state -- the figure is drawn from
+  # figstate, while the hero stats and the four result tables read cryptic_res --
+  # so anything that establishes a view must set both or the panel shows one
+  # locus's plot beside another locus's numbers. That is not a cosmetic bug in a
+  # tool used to call splicing events, so there is exactly one function that does
+  # it, and it is published for the Panel Runner rather than reimplemented there.
+  cryptic_open <- function(locus, control_bams, kd_bams, assembly, thresholds) {
+    buf <- tile_span_for(locus$start, locus$end)
+    bundle <- build_tile_bundle(locus$chrom, buf$start, buf$end,
+                                control_bams, kd_bams, assembly, cryptic_cache)
+    out <- cryptic_view_results(bundle, locus$chrom, locus$label,
+                                locus$start, locus$end, thresholds,
+                                # the "full view" reset always returns to
+                                orig_start = locus$start, orig_end = locus$end)
+    figstate$result <- out$figure
+    figstate$view <- list(start = locus$start, end = locus$end)
+    figstate$bundle <- bundle
+    figstate$thresholds <- thresholds
+    figstate$label <- locus$label
+
+    cryptic_bam_info(list(control = control_bams, kd = kd_bams, assembly = assembly))
+    cryptic_res(out$view)
+    cryptic_fig(out$figure)
+    cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
+    invisible(out$view)
+  }
+
   observeEvent(input$cryptic_go, {
     l2b_log("run", tool = "cryptic")
     cryptic_err(NULL); cryptic_res(NULL)
@@ -178,26 +206,9 @@ server_cryptic <- function(input, output, session, ctx) {
                            max_control_reads = input$cryptic_max_ctrl_reads,
                            exon_min = input$cryptic_exon_min, exon_max = input$cryptic_exon_max)
         incProgress(0.3, detail = "detecting + building figure")
-        # Read a BUFFER, not just the requested window: the margin either side is
-        # what panning and zooming move into without going back to the BAMs.
-        buf <- tile_span_for(locus$start, locus$end)
-        bundle <- build_tile_bundle(locus$chrom, buf$start, buf$end,
-                                    control_bams, kd_bams, input$cryptic_assembly, cryptic_cache)
-        out <- cryptic_view_results(bundle, locus$chrom, locus$label,
-                                    locus$start, locus$end, thresholds,
-                                    # the "full view" reset always returns to
-                                    orig_start = locus$start, orig_end = locus$end)
-        res <- out$view
-        figstate$result <- out$figure
-        figstate$view <- list(start = locus$start, end = locus$end)
-        figstate$bundle <- bundle
-        figstate$thresholds <- thresholds
-        figstate$label <- locus$label
-
-        cryptic_bam_info(list(control = control_bams, kd = kd_bams, assembly = input$cryptic_assembly))
-        cryptic_res(res)
-        cryptic_fig(out$figure)
-        cryptic_interp(NULL); cryptic_interp_err(NULL); cryptic_history(character(0))
+        # Reads a BUFFER, not just the requested window: the margin either side
+        # is what panning and zooming move into without going back to the BAMs.
+        res <- cryptic_open(locus, control_bams, kd_bams, input$cryptic_assembly, thresholds)
 
         # What the run *was* and what it found. The locus width goes in but the
         # coordinates don't: window size is what explains a slow run, whereas
@@ -624,7 +635,7 @@ server_cryptic <- function(input, output, session, ctx) {
   # run doesn't re-read the BAMs when opened. Methods & Ordering and Protein
   # Consequence read res only.
   ctx$publish("cryptic",
-    res = cryptic_res, err = cryptic_err,
+    res = cryptic_res, err = cryptic_err, open = cryptic_open,
     bam_info = cryptic_bam_info, cache = cryptic_cache,
     interp = cryptic_interp, interp_err = cryptic_interp_err, history = cryptic_history,
     aside_none = TRUE)
