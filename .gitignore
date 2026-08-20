@@ -6,6 +6,15 @@
 *.bai
 .claude/
 
+# App state written when running from a checkout: l2b_data_dir() falls back to
+# the working directory when LIT2BENCH_DATA_DIR is unset (the installed app
+# points it at Application Support instead). usage/ in particular is the user's
+# own private log of what they ran -- it is never uploaded anywhere and must
+# never be committed either.
+usage/
+protein-cache/
+update-check.json
+
 # lab notebook (user data -- procedures & experiments saved by the app)
 lab_notebook/
 dist/
