@@ -299,7 +299,10 @@ if [ -z "${LIT2BENCH_NO_DEV_SYNC:-}" ] && [ -f "$DEV_SOURCE_FILE" ]; then
         log "dev sync: already at $dev_head ($dev_branch)"
         APP_DIR="$SRC_DIR"
       else
-        step 3 "Updating Lit2Bench" "Syncing $dev_branch @ $dev_head…"
+        # braces are load-bearing: the ellipsis is multibyte and directly abuts the
+        # expansion, so $dev_head… parses as a variable named "dev_head\xe2" and
+        # `set -u` kills the launcher before it ever starts the server.
+        step 3 "Updating Lit2Bench" "Syncing ${dev_branch} @ ${dev_head}…"
         tmp="$SUPPORT/src.new"
         rm -rf "$tmp"; mkdir -p "$tmp"
         if git -C "$DEV_SRC" archive HEAD 2>/dev/null | tar -x -C "$tmp" 2>/dev/null && [ -f "$tmp/app.R" ]; then
