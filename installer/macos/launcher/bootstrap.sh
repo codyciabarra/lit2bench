@@ -264,6 +264,67 @@ else
   log "no Homebrew -- skipping primer3 (primer design will prompt for it)"
 fi
 
+# ----------------------------------------------------------------- dev sync
+# Run the app from the git checkout this bundle was built from, so a commit is
+# all it takes to update the installed app -- no rebuild, no download.
+#
+# This is a LOCAL DEVELOPER path, not an update channel, and the distinction is
+# the whole design. R/update_check.R still only ever notifies: nothing anywhere
+# fetches code over the network and runs it. DEV_SOURCE is written only when
+# building from a checkout (build.sh), names an absolute path on the machine
+# that built it, and is simply absent from a released .dmg -- so on anyone
+# else's Mac this block does nothing at all.
+#
+# Three deliberate choices:
+#   * the COMMITTED HEAD, not the working tree. `git archive` exports the last
+#     commit, so launching in the middle of an edit can never run half-saved
+#     code -- the thing that makes "it updates itself" frightening in an
+#     analysis tool.
+#   * into Application Support, never into the bundle. Mutating a signed bundle
+#     invalidates its signature; the app's writable state already lives there
+#     (see R/paths.R).
+#   * every failure falls back to the bundled copy. A deleted checkout, no git,
+#     a broken export -- none of them may stop the app from launching.
+#
+# LIT2BENCH_NO_DEV_SYNC=1 turns it off and pins the app to its bundled source.
+DEV_SOURCE_FILE="$RESOURCES_DIR/DEV_SOURCE"
+if [ -z "${LIT2BENCH_NO_DEV_SYNC:-}" ] && [ -f "$DEV_SOURCE_FILE" ]; then
+  DEV_SRC="$(cat "$DEV_SOURCE_FILE" 2>/dev/null)"
+  if [ -n "$DEV_SRC" ] && [ -d "$DEV_SRC/.git" ] && command -v git >/dev/null 2>&1; then
+    dev_head="$(git -C "$DEV_SRC" rev-parse --short HEAD 2>/dev/null)"
+    dev_branch="$(git -C "$DEV_SRC" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    SRC_DIR="$SUPPORT/src"
+    if [ -n "$dev_head" ]; then
+      if [ "$(cat "$SRC_DIR/.head" 2>/dev/null)" = "$dev_head" ] && [ -f "$SRC_DIR/app.R" ]; then
+        log "dev sync: already at $dev_head ($dev_branch)"
+        APP_DIR="$SRC_DIR"
+      else
+        step 3 "Updating Lit2Bench" "Syncing $dev_branch @ $dev_head…"
+        tmp="$SUPPORT/src.new"
+        rm -rf "$tmp"; mkdir -p "$tmp"
+        if git -C "$DEV_SRC" archive HEAD 2>/dev/null | tar -x -C "$tmp" 2>/dev/null && [ -f "$tmp/app.R" ]; then
+          # keep the marketing version, but report the commit actually running
+          base_ver="$(awk '{print $1}' "$RESOURCES_DIR/app/VERSION" 2>/dev/null)"
+          printf '%s (%s)\n' "${base_ver:-0.0.0}" "$dev_head" > "$tmp/VERSION"
+          printf '%s' "$dev_head" > "$tmp/.head"
+          rm -rf "$SRC_DIR"
+          if mv "$tmp" "$SRC_DIR" 2>/dev/null; then
+            APP_DIR="$SRC_DIR"
+            log "dev sync: updated to $dev_head ($dev_branch)"
+          else
+            log "dev sync: could not install export -- using bundled source"
+          fi
+        else
+          rm -rf "$tmp"
+          log "dev sync: git archive failed -- using bundled source"
+        fi
+      fi
+    fi
+  else
+    log "dev sync: checkout at '${DEV_SRC:-}' is gone -- using bundled source"
+  fi
+fi
+
 # -------------------------------------------------------------------- launch
 step 4 "Starting Lit2Bench" "Loading the toolkit…"
 

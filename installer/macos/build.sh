@@ -110,6 +110,19 @@ cp -R "$ROOT/www"        "$APP/Contents/Resources/app/"
 cp -R "$ROOT/references" "$APP/Contents/Resources/app/"
 printf '%s\n' "$FULL" > "$APP/Contents/Resources/app/VERSION"
 
+# A build made from a git checkout records where that checkout is, and the
+# launcher syncs the app from its committed HEAD on every launch -- so `git
+# commit` updates the installed app with no rebuild and no download. See the
+# "dev sync" block in bootstrap.sh.
+#
+# Deliberately skipped for a .dmg build: a release artifact must never carry a
+# path from the machine that built it. That is what keeps this a developer
+# convenience rather than an update channel.
+if [ "$MAKE_DMG" -eq 0 ] && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  printf '%s\n' "$ROOT" > "$APP/Contents/Resources/DEV_SOURCE"
+  say "dev sync: will follow $ROOT (git HEAD)"
+fi
+
 cp "$HERE/launcher/bootstrap.sh" "$HERE/launcher/status.sh" "$APP/Contents/Resources/launcher/"
 chmod +x "$APP/Contents/Resources/launcher/bootstrap.sh"
 
