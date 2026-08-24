@@ -53,17 +53,6 @@
 #
 # Every input id is unchanged. The server half of this file does not know or care
 # that the furniture moved.
-# "12th", "1st", "23rd" -- a percentile reads as a rank to a person, and
-# "12 pct" reads as a measurement. Handles the 11/12/13 exception.
-.ordinal <- function(n) {
-  n <- as.integer(round(n))
-  suffix <- ifelse(n %% 100 %in% 11:13, "th",
-             ifelse(n %% 10 == 1, "st",
-             ifelse(n %% 10 == 2, "nd",
-             ifelse(n %% 10 == 3, "rd", "th"))))
-  paste0(n, suffix)
-}
-
 panel_cryptic <- function() {
   div(class = "l2b-igv",
 
@@ -598,7 +587,7 @@ server_cryptic <- function(input, output, session, ctx) {
       out$Strength <- ifelse(is.na(df$novel_score), "—",
         ifelse(is.na(df$novel_pct),
                sprintf("%.1f bits", df$novel_score),
-               sprintf("%.1f bits · %s pct", df$novel_score, .ordinal(df$novel_pct))))
+               sprintf("%.1f bits · %s pct", df$novel_score, l2b_ordinal(df$novel_pct))))
     }
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)
@@ -746,9 +735,9 @@ server_cryptic <- function(input, output, session, ctx) {
           sprintf(" Nearest UG-rich block %d nt upstream, peaking at %.0f%%.",
                   abs(ub$distance[1]), 100 * ub$peak_density[1])
         } else "",
-        if (nrow(ev$sequence$repeats))
+        if (nrow(ev$sequence$repeats) && any(ev$sequence$repeats$near))
           sprintf(" A perfect (UG)%d run sits %d nt away.",
-                  ev$sequence$repeats$units[1], abs(ev$sequence$repeats$distance[1]))
+                  ev$sequence$repeats$units[ev$sequence$repeats$near][1], abs(ev$sequence$repeats$distance[ev$sequence$repeats$near][1]))
         else " No perfect (UG)n tandem run nearby, which is normal \u2014 most real sites are UG-rich rather than tandem."),
       div(class = "l2b-aside-note", style = "margin-top:8px;",
         tags$b("Measured binding: "), ev$clip$note))

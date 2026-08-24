@@ -924,6 +924,17 @@ l2b_stat <- function(label, value, note = NULL, tone = "") {
       if (!is.null(note)) div(class = "l2b-stat-note", note))
 }
 
+#' "12th", "1st", "23rd". A percentile reads as a rank to a person; "12 pct"
+#' reads as a measurement. Handles the 11/12/13 exception.
+l2b_ordinal <- function(n) {
+  n <- as.integer(round(n))
+  suffix <- ifelse(n %% 100 %in% 11:13, "th",
+             ifelse(n %% 10 == 1, "st",
+             ifelse(n %% 10 == 2, "nd",
+             ifelse(n %% 10 == 3, "rd", "th"))))
+  paste0(n, suffix)
+}
+
 l2b_hero <- function(...) div(class = "l2b-hero", ...)
 
 l2b_warn <- function(msgs) {
