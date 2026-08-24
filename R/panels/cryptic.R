@@ -494,7 +494,16 @@ server_cryptic <- function(input, output, session, ctx) {
                 br(),
                 DTOutput("cryptic_exon_tbl"),
                 p(class = "l2b-card-sub", "Select a span row above, then jump straight to the Primer Designer — no manual coordinate entry."),
-                actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;")
+                actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;"),
+                div(style = "margin-top:14px; padding-top:14px; border-top:1px solid var(--l2b-border);",
+                  p(class = "l2b-card-sub",
+                    "Why would this exon normally be silent? Reports two independent kinds of TDP-43 evidence for the ",
+                    "selected span: ", tags$b("sequence"), " — UG-repeat runs and strand-aware UG richness upstream vs ",
+                    "downstream, measured against this locus' own background — and ", tags$b("measured binding"),
+                    " from published ENCODE eCLIP. Those experiments are in K562 and HepG2, so for a neuronal gene they ",
+                    "often cannot answer at all; that is reported as its own state and never as \"not bound\"."),
+                  actionButton("cryptic_tdp43_go", "TDP-43 evidence for selected exon", class = "btn-ghost", style = "width:auto;"),
+                  uiOutput("cryptic_tdp43_out"))
               ),
               tabPanel(tagList("Retained introns (", textOutput("cryptic_n_ri", inline = TRUE), ")"),
                 br(),
@@ -711,6 +720,60 @@ server_cryptic <- function(input, output, session, ctx) {
     out$pos <- .splice_ai_probe_pos(kind, df$start, df$end, strand)
     out$local <- local_txt
     cryptic_spliceai(out)
+  })
+
+  # ---- TDP-43 evidence for a selected candidate exon ----------------------
+  cryptic_tdp43 <- reactiveVal(NULL)
+  observeEvent(cryptic_res(), cryptic_tdp43(NULL))   # an answer is about ONE span
+  output$cryptic_tdp43_out <- renderUI({
+    ev <- cryptic_tdp43()
+    if (is.null(ev)) return(NULL)
+    if (!is.null(ev$error)) return(l2b_warn(ev$error))
+    cx <- ev$sequence$context
+    # Sequence and measured evidence are shown as two separate lines on purpose:
+    # collapsing them into one score would let "no CLIP coverage" read as a
+    # negative, which is the one thing clip_peaks.R exists to prevent.
+    div(style = "margin-top:10px;",
+      div(class = "l2b-aside-note",
+        tags$b("Sequence: "),
+        sprintf("UG density %.0f%% upstream vs %.0f%% downstream (%.1f\u00d7)%s.",
+                100 * cx$upstream, 100 * cx$downstream, cx$ratio,
+                if (!is.na(cx$ratio) && cx$ratio >= 2 && cx$upstream >= 0.10)
+                  " \u2014 the asymmetry TDP-43 repression usually shows" else ""),
+        if (!is.null(cx$blocks) && nrow(cx$blocks) &&
+            any(cx$blocks$side == "upstream")) {
+          ub <- cx$blocks[cx$blocks$side == "upstream", , drop = FALSE]
+          sprintf(" Nearest UG-rich block %d nt upstream, peaking at %.0f%%.",
+                  abs(ub$distance[1]), 100 * ub$peak_density[1])
+        } else "",
+        if (nrow(ev$sequence$repeats))
+          sprintf(" A perfect (UG)%d run sits %d nt away.",
+                  ev$sequence$repeats$units[1], abs(ev$sequence$repeats$distance[1]))
+        else " No perfect (UG)n tandem run nearby, which is normal \u2014 most real sites are UG-rich rather than tandem."),
+      div(class = "l2b-aside-note", style = "margin-top:8px;",
+        tags$b("Measured binding: "), ev$clip$note))
+  })
+  observeEvent(input$cryptic_tdp43_go, {
+    req(cryptic_res())
+    sel <- input$cryptic_exon_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) {
+      cryptic_tdp43(list(error = "Select a candidate exon row first.")); return(invisible())
+    }
+    r <- cryptic_res(); df <- r$candidates$candidate_exons[sel, ]
+    strand <- if (!is.null(r$transcript) && !is.null(r$transcript$strand)) r$transcript$strand[1] else "+"
+    l2b_log("tdp43_evidence", tool = "cryptic")   # not a run -- reports on an existing result
+    withProgress(message = "Reading TDP-43 evidence...", value = 0.4, {
+      out <- tryCatch({
+        flank <- 3000L
+        win <- fetch_genomic(r$chrom, df$start - flank, df$end + flank, assembly = input$cryptic_assembly)
+        tdp43_evidence(r$chrom, df$start, df$end, strand,
+                       window_seq = win, window_start = df$start - flank,
+                       assembly = input$cryptic_assembly,
+                       gene_start = r$orig_start, gene_end = r$orig_end,
+                       progress = function(m) incProgress(0.1, detail = m))
+      }, error = function(e) list(error = conditionMessage(e)))
+    })
+    cryptic_tdp43(out)
   })
 
   observeEvent(input$cryptic_design_junc_go, {

@@ -362,3 +362,130 @@ annotate_junction_strength <- function(junctions, window_seq, window_start, pwm,
   junctions$novel_pct      <- round(novel_pct)
   junctions
 }
+
+# --------------------------------------------------------------------------
+# 6. TDP-43 UG context (degenerate)
+# --------------------------------------------------------------------------
+# find_ug_repeats() above matches PERFECT (UG)n tandem runs. That is the
+# high-affinity ideal and it stays -- when one is there it is the strongest
+# sequence evidence available. But it is not how most real sites look, and
+# taking it as the whole measure fails on the best-characterized example there
+# is: measured on the UNC13A cryptic exon against the real SCR/TDP43KD pair,
+# there is NO (UG)>=4 run within 1.5 kb, none at >=6 within 15 kb, and the one
+# >=4 in range sits 12 kb away.
+#
+# The same region read as UG-RICHNESS rather than tandem repeat, strand-aware,
+# shows the expected architecture plainly (30-nt windows, minus-strand gene so
+# transcript-upstream is the higher coordinate):
+#
+#   500 nt upstream of the cryptic exon   14.2%      <- UG-rich
+#   the cryptic exon body                  3.9%
+#   500 nt downstream                      3.0%
+#
+# with discrete 40-45% blocks at +215 and +267 nt. That is TDP-43 repression as
+# it is usually described: UG-rich intronic sequence just 5' of the exon.
+#
+# So both measures ship. Neither is asserted to BE the repressive element --
+# these report measured sequence composition, and clip_peaks.R is what brings
+# actual measured binding.
+
+#' Sliding UG/TG dinucleotide density along a sequence.
+#'
+#' @return numeric of length nchar(seq)-1, NA at the window's edges. Index i
+#'         corresponds to genomic seq_start + i - 1.
+ug_density_profile <- function(seq, window = 30L) {
+  if (is.null(seq) || is.na(seq) || nchar(seq) < window + 1L) return(numeric(0))
+  s <- toupper(seq); n <- nchar(s)
+  d <- substring(s, 1:(n - 1L), 2:n)
+  as.numeric(stats::filter(as.numeric(d %in% c("TG", "GT")), rep(1 / window, window), sides = 2))
+}
+
+#' Contiguous blocks whose UG density stays above a threshold.
+#'
+#' @param min_density absolute floor. The caller normally passes a percentile of
+#'        a locally-measured background rather than a constant -- UG density
+#'        varies enough between genes that a fixed cutoff means different things
+#'        in different places.
+#' @return data.frame(start, end, width, peak_density, mean_density), strongest first.
+ug_rich_blocks <- function(seq, seq_start = 1L, window = 30L,
+                           min_density = 0.25, min_width = 20L) {
+  empty <- data.frame(start = integer(0), end = integer(0), width = integer(0),
+                      peak_density = numeric(0), mean_density = numeric(0))
+  p <- ug_density_profile(seq, window)
+  if (length(p) == 0) return(empty)
+  pos <- seq_start + seq_along(p) - 1L
+  hi <- which(!is.na(p) & p >= min_density)
+  if (length(hi) == 0) return(empty)
+
+  grp <- cumsum(c(1L, as.integer(diff(hi) > 1L)))
+  out <- do.call(rbind, lapply(unique(grp), function(g) {
+    idx <- hi[grp == g]
+    a <- pos[idx[1]]; b <- pos[idx[length(idx)]]
+    if (b - a + 1L < min_width) return(NULL)
+    data.frame(start = a, end = b, width = b - a + 1L,
+               peak_density = max(p[idx]), mean_density = mean(p[idx]))
+  }))
+  if (is.null(out)) return(empty)
+  out <- out[order(-out$peak_density), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
+#' Strand-aware UG context around a feature (a cryptic exon, or a splice site).
+#'
+#' "Upstream" means upstream IN TRANSCRIPT ORDER, which on a minus-strand gene
+#' is the HIGHER genomic coordinate. That distinction is the whole measurement:
+#' at UNC13A the upstream/downstream ratio is ~4.5x, and computing it
+#' plus-strand-blind would average the two sides together and report nothing.
+#'
+#' @param seq plus-strand reference covering feature +/- flank.
+#' @param background optional numeric vector of density values from elsewhere in
+#'        the same gene; when supplied, blocks are called against its 95th
+#'        percentile and a z-score is reported.
+#' @return list(upstream, downstream, feature, ratio, z_peak, blocks, window)
+#'         where blocks carry `side` ("upstream"/"downstream"/"overlapping") and
+#'         `distance` in transcript orientation.
+tdp43_ug_context <- function(seq, seq_start, feat_start, feat_end, strand = "+",
+                             window = 30L, flank = 500L, background = NULL) {
+  minus <- identical(strand, "-")
+  sub_density <- function(a, b) {
+    i <- a - seq_start + 1L; j <- b - seq_start + 1L
+    if (i < 1L || j > nchar(seq) || j <= i) return(NA_real_)
+    s <- toupper(substr(seq, i, j)); n <- nchar(s)
+    if (n < 2L) return(NA_real_)
+    d <- substring(s, 1:(n - 1L), 2:n)
+    mean(d %in% c("TG", "GT"))
+  }
+  # transcript-upstream is the high side on the minus strand
+  up   <- if (minus) sub_density(feat_end + 1L, feat_end + flank) else sub_density(feat_start - flank, feat_start - 1L)
+  down <- if (minus) sub_density(feat_start - flank, feat_start - 1L) else sub_density(feat_end + 1L, feat_end + flank)
+  feat <- sub_density(feat_start, feat_end)
+
+  thr <- if (!is.null(background) && length(background)) {
+    as.numeric(stats::quantile(background[!is.na(background)], 0.95))
+  } else 0.25
+  blocks <- ug_rich_blocks(seq, seq_start, window = window, min_density = thr)
+
+  if (nrow(blocks)) {
+    mid <- (blocks$start + blocks$end) / 2
+    overlapping <- blocks$end >= feat_start & blocks$start <= feat_end
+    up_side <- if (minus) mid > feat_end else mid < feat_start
+    blocks$side <- ifelse(overlapping, "overlapping", ifelse(up_side, "upstream", "downstream"))
+    raw <- ifelse(mid < feat_start, mid - feat_start, ifelse(mid > feat_end, mid - feat_end, 0))
+    blocks$distance <- as.integer(round(if (minus) -raw else raw))
+    blocks <- blocks[order(blocks$side != "upstream", abs(blocks$distance)), , drop = FALSE]
+    rownames(blocks) <- NULL
+  }
+
+  z <- NA_real_
+  if (!is.null(background) && length(background)) {
+    b <- background[!is.na(background)]
+    if (length(b) > 1 && stats::sd(b) > 0) {
+      p <- ug_density_profile(seq, window)
+      if (length(p)) z <- (max(p, na.rm = TRUE) - mean(b)) / stats::sd(b)
+    }
+  }
+  list(upstream = up, downstream = down, feature = feat,
+       ratio = if (is.na(up) || is.na(down) || down == 0) NA_real_ else up / down,
+       z_peak = z, blocks = blocks, window = window, flank = flank, strand = strand)
+}

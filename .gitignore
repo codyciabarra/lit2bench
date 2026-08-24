@@ -15,6 +15,7 @@ usage/
 protein-cache/
 update-check.json
 splice-pwm-*.json
+clip-cache/
 
 # lab notebook (user data -- procedures & experiments saved by the app)
 lab_notebook/
