@@ -32,17 +32,80 @@ SASHIMI_DARK_COL <- list(
 )
 
 # --------------------------------------------------------------------------
-# Geometry helpers
+# TWO-LAYER GEOMETRY -- what makes this figure navigable without a round-trip.
+#
+# The figure is emitted as one <svg> with a pixel viewBox (unchanged) holding
+# two sibling groups:
+#
+#   <g class="sashimi-geom" transform="translate(tx,0) scale(sx,1)">
+#        every shape, authored in GENOMIC units on x and pixels on y
+#   <g class="sashimi-labels">
+#        every piece of text, authored in pixels
+#
+# Panning is then `tx += dx` and zooming is `sx *= k` -- one attribute write on
+# one element, no re-render, no server round-trip, and no blur, because SVG is
+# vector. SASHIMI_JS repositions the labels in the same frame from each one's
+# data-bp.
+#
+# WHY A TRANSFORM AND NOT A GENOMIC viewBox. Putting the genomic coordinates in
+# the root viewBox is the more obvious spelling of this, and it was the plan,
+# but it breaks on three things here:
+#
+#   1. The root viewBox is shared with the label layer. Making it genomic forces
+#      text into a counter-scaled overlay whose counter-scale changes on every
+#      zoom -- exactly the "text is 400,000 units wide" failure, just relocated.
+#   2. preserveAspectRatio is already load-bearing in two modes: "none" for the
+#      drag-resizable compact view, "xMidYMid meet" for Expand view. A viewBox of
+#      width 30000 (bp) and height 618 (px) makes `meet` meaningless.
+#   3. The static export (build_sashimi_html -> the download and the headless-
+#      Chrome PDF) has no JS at all, so labels must already be correct with zero
+#      script. They are, because R positions them for the initial view and JS
+#      only ever *re*-positions.
+#
+# A transform on a <g> is the same single-attribute write with the same
+# compositing behaviour, and it leaves all three of those intact.
+#
+# GEOMETRY X IS RELATIVE TO result$start, not absolute bp. Absolute coordinates
+# run to ~2.5e8 on chr1, and multiplying those by an sx of ~1e-4 inside a
+# renderer that may use single-precision floats for path data is asking for
+# visible jitter at deep zoom. Subtracting the window origin keeps authored
+# values in 0..span. The absolute coordinate is still on every element as
+# data-start/data-end, because that is what tooltips and the primer handoff
+# need, and those must never be reconstructed by arithmetic.
+#
+# STROKES DO NOT SCALE. Everything stroked inside the geometry layer carries
+# vector-effect="non-scaling-stroke", so a 1.2px rule stays 1.2px at any zoom
+# instead of becoming a 400 kb-wide slab. This is also what gives thin features
+# a floor: a 3 bp exon is drawn at its true width with a 1px non-scaling stroke,
+# so it stays visible without being drawn wider than it is -- an artificial
+# minimum width in genomic units would lie about the size of small exons at
+# exactly the zoom level where someone is inspecting them.
 # --------------------------------------------------------------------------
 
-#' Linear bp -> pixel-x closure, shared by every track (the genome-browser analog
-#' of plasmid_map.R's .bp_to_angle()).
-.x_of_bp <- function(start, end, x0, x1) {
-  span <- max(1, end - start)
-  function(bp) x0 + (bp - start) / span * (x1 - x0)
+#' The geometry layer's x for a genomic coordinate: bp relative to the window
+#' origin. (Replaces the old .x_of_bp() pixel mapping -- the bp -> pixel step is
+#' now the group transform, and lives in one place instead of every draw call.)
+.geom_x <- function(origin) function(bp) bp - origin
+
+#' The <g> transform mapping a genomic view onto the pixel drawing region.
+#' Composed so a point at `bp` lands at x_left + (bp - view_start) * sx.
+.geom_transform <- function(view_start, view_end, origin, x_left, x_right) {
+  sx <- (x_right - x_left) / max(1, view_end - view_start)
+  tx <- x_left - (view_start - origin) * sx
+  sprintf("translate(%.6f,0) scale(%.10f,1)", tx, sx)
+}
+
+#' Pixels per bp for a view -- the scale JS also computes, kept here so the
+#' initial render and the live render agree by construction.
+.geom_scale <- function(view_start, view_end, x_left, x_right) {
+  (x_right - x_left) / max(1, view_end - view_start)
 }
 
 #' "Nice" round tick positions for a bp axis (1/2/5 x 10^k spacing).
+#' NOTE: duplicated as niceTicks() in SASHIMI_JS, which owns the axis once the
+#' user starts navigating. The duplication is unavoidable -- the static export
+#' has no JS and the live view has no server -- so if you change the stepping
+#' here, change it there, and vice versa.
 .nice_ticks <- function(lo, hi, target = 9) {
   span <- max(1, hi - lo); raw <- span / target
   mag <- 10^floor(log10(raw)); norm <- raw / mag
@@ -50,17 +113,28 @@ SASHIMI_DARK_COL <- list(
   seq(ceiling(lo / step) * step, hi, by = step)
 }
 
-#' Format a bp coordinate compactly for axis labels (e.g. 17.64 Mb, 320 kb).
-.fmt_bp <- function(bp) {
-  if (bp >= 1e6) sprintf("%.2f Mb", bp / 1e6)
-  else if (bp >= 1e3) sprintf("%.0f kb", bp / 1e3)
-  else sprintf("%d bp", as.integer(bp))
+#' Format a bp coordinate for an axis label, given the TICK SPACING.
+#'
+#' The spacing is the whole point. The old version formatted Mb to two decimals
+#' regardless, so a 7 kb window -- now trivially reachable, since zoom is a drag
+#' away rather than a round trip -- drew nine ticks all reading "6.54 Mb". The
+#' rule here is: pick the unit from the window, then carry exactly enough
+#' decimals for one step to change the last digit.
+#'
+#' Duplicated as fmtBp() in SASHIMI_JS -- same reason as .nice_ticks().
+.fmt_bp <- function(bp, step = NULL) {
+  if (is.null(step) || !is.finite(step) || step <= 0) step <- max(1, bp / 100)
+  dec <- function(div) max(0, ceiling(-log10(step / div)))
+  if (bp >= 1e6 && step >= 1e4) sprintf("%.*f Mb", dec(1e6), bp / 1e6)
+  else if (bp >= 1e3 && step >= 10) sprintf("%.*f kb", dec(1e3), bp / 1e3)
+  else format(round(bp), big.mark = ",", trim = TRUE)
 }
 
 #' Filled coverage-area path through evenly spaced bins, closed to a baseline.
-.coverage_area <- function(bins, x_left, x_right, baseline, top_y, max_depth) {
+#' xs are in geometry (bp-relative) units spanning [gx_lo, gx_hi].
+.coverage_area <- function(bins, gx_lo, gx_hi, baseline, top_y, max_depth) {
   n <- length(bins)
-  xs <- x_left + (seq_len(n) - 0.5) / n * (x_right - x_left)
+  xs <- gx_lo + (seq_len(n) - 0.5) / n * (gx_hi - gx_lo)
   ys <- baseline - pmin(1, bins / max_depth) * (baseline - top_y)
   pts <- paste(sprintf("%.1f,%.1f", xs, ys), collapse = " L ")
   list(path = sprintf("M %.1f,%.1f L %s L %.1f,%.1f Z", xs[1], baseline, pts, xs[n], baseline),
@@ -75,46 +149,65 @@ SASHIMI_DARK_COL <- list(
   sprintf("M %.1f,%.1f Q %.1f,%.1f %.1f,%.1f", x1, base_y, xm, ctrl_y, x2, base_y)
 }
 
+#' A label for the overlay layer. data-bp is what SASHIMI_JS re-reads on every
+#' pan/zoom to recompute x; a label with no bp (a track name pinned to the left
+#' gutter, a read count pinned to the right) simply omits it and never moves.
+.lbl <- function(x, y, text, ..., bp = NULL, dx = 0, class = NULL) {
+  attrs <- list(...)
+  extra <- paste(sprintf(' %s="%s"', names(attrs), unlist(attrs)), collapse = "")
+  sprintf('<text class="sashimi-lbl%s"%s%s x="%.1f" y="%.1f"%s>%s</text>',
+          if (is.null(class)) "" else paste0(" ", class),
+          if (is.null(bp)) "" else sprintf(' data-bp="%d"', as.integer(bp)),
+          if (dx == 0) "" else sprintf(' data-dx="%.1f"', dx),
+          x, y, extra, text)
+}
+
 # --------------------------------------------------------------------------
 # One coverage + arc track (IGV-style: coverage wiggle at the bottom, junction
 # arcs rising above it, a [0 - max] range tag top-left, sample name to its right).
+# Returns list(geom, labels) -- see the two-layer note above.
 # --------------------------------------------------------------------------
-.track_svg <- function(bins, junctions, x_of, x_left, x_right, y_top, arc_h, cov_h,
+.track_svg <- function(bins, junctions, gx, gx_lo, gx_hi, x_left, x_right, y_top, arc_h, cov_h,
                        label, n_reads, max_depth, max_reads, col, fill, line, arc_col,
-                       novel_keys = character(0), bp_start = NULL, bp_end = NULL) {
+                       novel_keys = character(0), bp_start = NULL, bp_end = NULL,
+                       px_per_bp = 1, gutter_x = 8) {
   baseline <- y_top + arc_h + cov_h
   cov_top <- y_top + arc_h
   track_id <- tolower(label)
-  s <- character(0)
+  s <- character(0); L <- character(0); FX <- character(0)
 
   # coverage wiggle
-  ar <- .coverage_area(bins, x_left, x_right, baseline, cov_top, max_depth)
+  ar <- .coverage_area(bins, gx_lo, gx_hi, baseline, cov_top, max_depth)
   s <- c(s, sprintf('<path d="%s" fill="%s" opacity="0.9"/>', ar$path, fill))
-  s <- c(s, sprintf('<path d="%s" fill="none" stroke="%s" stroke-width="1.2"/>', ar$line, line))
-  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2"/>',
-                     x_left, baseline, x_right, baseline, col$muted))
+  s <- c(s, sprintf('<path d="%s" fill="none" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>', ar$line, line))
+  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
+                     gx_lo, baseline, gx_hi, baseline, col$muted))
 
-  # invisible per-bin hover targets over the coverage zone, so hovering anywhere
-  # in the wiggle can show the depth + genomic position at that point -- reuses
-  # the exact same bin x-positions .coverage_area() draws with (no new binning).
+  # ONE hit target for the whole coverage zone, carrying its bin array, instead of
+  # one invisible <rect> per bin.
+  #
+  # Per-bin rects were 2,400 nodes per track -- 4,800 in the figure -- and every
+  # one of them is geometry the compositor re-rasterizes on each pan frame. That
+  # is the single largest cost in the DOM and it buys nothing a lookup cannot: the
+  # depth under the cursor is arr[floor((bp - start) / binBp)], which is the same
+  # number the rect would have carried, found in constant time. The array is a
+  # comma-joined integer string -- ~12 KB against 2,400 elements, a trade worth
+  # making several times over.
   if (!is.null(bp_start) && !is.null(bp_end)) {
-    n <- length(bins)
-    bin_w <- (x_right - x_left) / n
-    for (i in seq_len(n)) {
-      bx <- x_left + (i - 1) * bin_w
-      bp <- round(bp_start + (i - 0.5) / n * (bp_end - bp_start))
-      s <- c(s, sprintf('<rect class="sashimi-hover-bin" data-position="%d" data-depth="%d" data-track="%s" x="%.2f" y="%.1f" width="%.2f" height="%.1f" fill="transparent"/>',
-                        bp, round(bins[i]), track_id, bx, cov_top, bin_w + 0.5, baseline - cov_top))
-    }
+    s <- c(s, sprintf('<rect class="sashimi-cov-hit" data-track="%s" data-bp-start="%d" data-bp-end="%d" data-cov="%s" x="%.2f" y="%.1f" width="%.2f" height="%.1f" fill="transparent"/>',
+                      track_id, bp_start, bp_end, paste(round(bins), collapse = ","),
+                      gx_lo, cov_top, gx_hi - gx_lo, baseline - cov_top))
   }
 
-  # IGV-style range tag + sample label
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11" fill="%s">[0 - %s]</text>',
-                     x_left + 2, y_top + arc_h - 6, col$faint, format(round(max_depth), big.mark = ",")))
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-size="14" font-weight="700" fill="%s">%s</text>',
-                     x_left + 2, y_top + 14, col$ink, label))
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" text-anchor="end" font-size="11.5" fill="%s">%s reads</text>',
-                     x_right, y_top + 14, col$muted, format(n_reads, big.mark = ",")))
+  # IGV-style range tag + sample label -- pinned to the gutters, so they carry no
+  # data-bp and stay put while the genome scrolls underneath them.
+  # Gutter furniture and the read count are PINNED -- they go in the fixed layer,
+  # which never carries a transform. Only bp-anchored labels ride the pan.
+  FX <- c(FX, .lbl(gutter_x, y_top + 30, label, `font-size` = "13", `font-weight` = "700", fill = col$ink))
+  FX <- c(FX, .lbl(gutter_x, y_top + 46, sprintf("[0 - %s]", format(round(max_depth), big.mark = ",")),
+                   `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", `font-size` = "10.5", fill = col$faint))
+  FX <- c(FX, .lbl(x_right - 6, y_top + 30, sprintf("%s reads", format(n_reads, big.mark = ",")),
+                   `text-anchor` = "end", `font-size` = "11.5", fill = col$muted))
 
   # junction arcs, drawn tallest-support last so heavy junctions sit on top
   if (nrow(junctions) > 0) {
@@ -123,27 +216,36 @@ SASHIMI_DARK_COL <- list(
     for (i in seq_len(nrow(jo))) {
       j <- jo[i, ]; frac <- log1p(j$reads) / lr_max
       is_novel <- sprintf("%d-%d", j$start, j$end) %in% novel_keys
-      ax1 <- x_of(j$start); ax2 <- x_of(j$end)
+      ax1 <- gx(j$start); ax2 <- gx(j$end)
       apex <- cov_top - frac * (cov_top - y_top - 10)
       cc <- if (is_novel) col$novel else arc_col
       sw <- 1 + 3.2 * frac
+      jkey <- sprintf("%d-%d", j$start, j$end)
       s <- c(s, sprintf(
-        '<g class="sashimi-junction%s" tabindex="0" role="button" data-start="%d" data-end="%d" data-reads="%d" data-novel="%s" data-track="%s" aria-label="%s junction %d-%d, %d reads">',
+        '<g class="sashimi-junction%s" tabindex="0" role="button" data-start="%d" data-end="%d" data-reads="%d" data-novel="%s" data-track="%s" data-jkey="%s" aria-label="%s junction %d-%d, %d reads">',
         if (is_novel) " sashimi-junction-novel" else "", j$start, j$end, j$reads,
-        if (is_novel) "true" else "false", track_id, label, j$start, j$end, j$reads))
+        if (is_novel) "true" else "false", track_id, jkey, label, j$start, j$end, j$reads))
       arc_d <- .sashimi_arc(ax1, ax2, cov_top, apex)
-      hit_x <- min(ax1, ax2) - 4; hit_w <- abs(ax2 - ax1) + 8
-      hit_y <- apex - 6; hit_h <- (cov_top - apex) + 12
-      s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="transparent"/>',
-                        hit_x, hit_y, hit_w, hit_h))
-      s <- c(s, sprintf('<path class="sashimi-junction-arc" d="%s" fill="none" stroke="%s" stroke-width="%.2f" opacity="%s"/>',
+      # Hit target: a fat TRANSPARENT stroke along the arc itself, with
+      # pointer-events="stroke". A padded rect (what this used to be) can't work
+      # once x is genomic -- its "4px" of padding would be 4 bp, i.e. invisible
+      # when zoomed out and enormous when zoomed in. A non-scaling stroke gives a
+      # constant ~14px grab corridor that follows the curve at every zoom level.
+      s <- c(s, sprintf('<path class="sashimi-junction-hit" d="%s" fill="none" stroke="transparent" stroke-width="14" vector-effect="non-scaling-stroke" pointer-events="stroke"/>', arc_d))
+      s <- c(s, sprintf('<path class="sashimi-junction-arc" d="%s" fill="none" stroke="%s" stroke-width="%.2f" vector-effect="non-scaling-stroke" opacity="%s"/>',
                         arc_d, cc, sw, if (is_novel) "0.95" else "0.7"))
-      s <- c(s, sprintf('<text x="%.1f" y="%.1f" text-anchor="middle" font-size="11" font-weight="%s" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="%s">%d</text>',
-                        (ax1 + ax2) / 2, apex - 4, if (is_novel) "800" else "600", cc, j$reads))
       s <- c(s, '</g>')
+      # the read-count label rides in the overlay, keyed back to its arc so
+      # applyFilter() can dim the two together
+      L <- c(L, .lbl(x_left + (ax1 + ax2) / 2 * px_per_bp, apex - 4, j$reads,
+                     bp = (j$start + j$end) / 2, class = "sashimi-jlabel",
+                     `data-jkey` = jkey, `text-anchor` = "middle", `font-size` = "11",
+                     `font-weight` = if (is_novel) "800" else "600",
+                     `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", fill = cc))
     }
   }
-  paste(s, collapse = "")
+  list(geom = paste(s, collapse = ""), labels = paste(L, collapse = ""),
+       fixed = paste(FX, collapse = ""))
 }
 
 # --------------------------------------------------------------------------
@@ -168,70 +270,102 @@ SASHIMI_DARK_COL <- list(
   segs
 }
 
-.gene_track_svg <- function(transcript, x_of, y_top, height, col, note = NULL) {
+.gene_track_svg <- function(transcript, gx, x_left, y_top, height, col, note = NULL,
+                            px_per_bp = 1, view_start = NULL, x_right_px = NULL) {
   y_mid <- y_top + height / 2 + 6; exon_h_cds <- 22; exon_h_utr <- 12
-  x_l <- x_of(min(transcript$start)); x_r <- x_of(max(transcript$end))
-  s <- character(0)
+  tx_lo <- min(transcript$start); tx_hi <- max(transcript$end)
+  g_l <- gx(tx_lo); g_r <- gx(tx_hi)
+  s <- character(0); L <- character(0); U <- character(0)
+  px <- function(bp) x_left + (gx(bp) - gx(view_start)) * px_per_bp
 
-  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.6"/>',
-                     x_l, y_mid, x_r, y_mid, col$intron))
+  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.6" vector-effect="non-scaling-stroke"/>',
+                     g_l, y_mid, g_r, y_mid, col$intron))
   dir <- if (identical(transcript$strand[1], "-")) -1 else 1
-  if (x_r - x_l > 40) {
-    for (cx in seq(x_l + 26, x_r - 14, by = 46)) {
-      s <- c(s, sprintf('<path d="M %.1f,%.1f L %.1f,%.1f L %.1f,%.1f" fill="none" stroke="%s" stroke-width="1.4"/>',
+
+  # Strand chevrons are pixel-spaced decoration (every 46px along the visible
+  # intron line), so they can't live in the genomic layer -- a chevron scaled by
+  # sx stops being a chevron. They go in their own UNDERLAY group, which is
+  # pixel space like the labels but painted BEFORE the geometry, so exon boxes
+  # cover the chevrons that fall inside them exactly as they did when both were
+  # drawn in one layer. SASHIMI_JS regenerates them on every view change; R
+  # still emits the initial set, because the static export (download / PDF) runs
+  # with no JS at all and must be complete on its own.
+  # match the client's clamp bounds (SASHIMI_JS applyView) so the first paint and
+  # every repaint after it put these two labels in the same place
+  px_l <- min(max(px(tx_lo), x_left), x_left + (x_right_px - x_left) - 240)
+  px_r <- px(tx_hi)
+  if (px_r - px_l > 40) {
+    for (cx in seq(px_l + 26, px_r - 14, by = 46)) {
+      U <- c(U, sprintf('<path class="sashimi-chevron" d="M %.1f,%.1f L %.1f,%.1f L %.1f,%.1f" fill="none" stroke="%s" stroke-width="1.4"/>',
                         cx - 4 * dir, y_mid - 4, cx + 4 * dir, y_mid, cx - 4 * dir, y_mid + 4, col$intron))
     }
   }
+
   for (i in seq_len(nrow(transcript))) {
-    ex <- transcript[i, ]; x0e <- x_of(ex$start); x1e <- x_of(ex$end)
+    ex <- transcript[i, ]
     cls <- classify_exon_region(ex$start, ex$end, ex$cds_start, ex$cds_end, transcript$strand[1])
     segs <- .exon_utr_cds_segments(ex$start, ex$end, ex$cds_start, ex$cds_end)
 
-    # invisible full-height hit target first, so hovering/clicking a thin
-    # UTR sliver is exactly as easy as clicking the CDS part of the same exon
+    # invisible hit target first, so hovering/clicking a thin UTR sliver -- or a
+    # small exon at low zoom -- is exactly as easy as clicking a wide CDS block.
+    # The generous area comes from a transparent NON-SCALING stroke rather than
+    # padded width, so it stays ~4px on each side at every zoom.
     s <- c(s, sprintf(
       paste0('<g class="sashimi-exon" tabindex="0" role="button" data-name="Exon %d" ',
              'data-start="%d" data-end="%d" data-length="%d" data-region="%s" ',
              'aria-label="Exon %d, %s, %d-%d, %d bp">'),
       ex$exon_number, ex$start, ex$end, ex$length, cls$region,
       ex$exon_number, cls$region, ex$start, ex$end, ex$length))
-    s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%d" fill="transparent"/>',
-                      x0e, y_mid - exon_h_cds / 2 - 4, max(1.5, x1e - x0e), exon_h_cds + 8))
+    s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%d" fill="transparent" stroke="transparent" stroke-width="8" vector-effect="non-scaling-stroke" pointer-events="all"/>',
+                      gx(ex$start), y_mid - exon_h_cds / 2 - 4, max(0.01, gx(ex$end) - gx(ex$start)), exon_h_cds + 8))
     for (seg in segs) {
-      sx0 <- x_of(seg$start); sx1 <- x_of(seg$end)
       h <- if (seg$cds) exon_h_cds else exon_h_utr
-      s <- c(s, sprintf('<rect class="sashimi-exon-box" x="%.1f" y="%.1f" width="%.1f" height="%d" rx="2" fill="%s" stroke="%s" stroke-width="1"/>',
-                        sx0, y_mid - h / 2, max(1.5, sx1 - sx0), h, col$exon_fill, col$exon_stroke))
+      s <- c(s, sprintf('<rect class="sashimi-exon-box" x="%.1f" y="%.1f" width="%.1f" height="%d" fill="%s" stroke="%s" stroke-width="1" vector-effect="non-scaling-stroke"/>',
+                        gx(seg$start), y_mid - h / 2, max(0.01, gx(seg$end) - gx(seg$start)), h, col$exon_fill, col$exon_stroke))
     }
     s <- c(s, '</g>')
   }
   lbl <- transcript$name[1]
   strand_txt <- if (dir < 0) "(- strand)" else "(+ strand)"
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-size="13" font-weight="700" fill="%s">%s <tspan fill="%s" font-weight="500">%s</tspan></text>',
-                     x_l, y_top + 14, col$ink, lbl, col$muted, strand_txt))
+  # data-clamp: keep these two pinned inside the drawing region rather than
+  # letting them scroll away. A transcript is usually wider than the view, so a
+  # label positioned at its start would vanish the moment you pan into the gene
+  # -- which is exactly when you most want to know which transcript you are
+  # looking at. Clamped labels stick to the gutter, like IGV's track names.
+  L <- c(L, .lbl(px_l, y_top + 14,
+                 sprintf('%s <tspan fill="%s" font-weight="500">%s</tspan>', lbl, col$muted, strand_txt),
+                 bp = tx_lo, class = "sashimi-sticky", `data-clamp` = "start",
+                 `font-size` = "13", `font-weight` = "700", fill = col$ink))
   if (!is.null(note)) {
-    s <- c(s, sprintf('<text x="%.1f" y="%.1f" text-anchor="end" font-size="11.5" fill="%s">%s</text>',
-                      x_r, y_top + 14, col$faint, note))
+    L <- c(L, .lbl(px_r, y_top + 14, note, bp = tx_hi, class = "sashimi-sticky",
+                   `data-clamp` = "end", `text-anchor` = "end",
+                   `font-size` = "11.5", fill = col$faint))
   }
-  paste(s, collapse = "")
+  list(geom = paste(s, collapse = ""), labels = paste(L, collapse = ""),
+       underlay = paste(U, collapse = ""))
 }
 
 # --------------------------------------------------------------------------
-# Genomic coordinate ruler.
+# Genomic coordinate ruler. Tick MARKS are geometry (they must track the
+# genome); tick LABELS are overlay. SASHIMI_JS rebuilds both on view change,
+# because the round numbers themselves change as you zoom -- a ruler that
+# panned its old labels along would be worse than no ruler.
 # --------------------------------------------------------------------------
-.axis_svg <- function(chrom, start, end, x_of, y_top, col) {
-  s <- character(0)
-  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2"/>',
-                     x_of(start), y_top, x_of(end), y_top, col$muted))
-  for (t in .nice_ticks(start, end)) {
-    xt <- x_of(t)
-    s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2"/>', xt, y_top, xt, y_top + 6, col$muted))
-    s <- c(s, sprintf('<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10.5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="%s">%s</text>',
-                      xt, y_top + 20, col$muted, .fmt_bp(t)))
+.axis_svg <- function(chrom, start, end, gx, x_left, x_right, y_top, col, px_per_bp = 1, gutter_x = 8) {
+  s <- character(0); L <- character(0)
+  s <- c(s, sprintf('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
+                     gx(start), y_top, gx(end), y_top, col$muted))
+  ticks <- .nice_ticks(start, end)
+  tick_step <- if (length(ticks) > 1) ticks[2] - ticks[1] else max(1, (end - start) / 9)
+  for (t in ticks) {
+    s <- c(s, sprintf('<line class="sashimi-tick" x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1.2" vector-effect="non-scaling-stroke"/>',
+                      gx(t), y_top, gx(t), y_top + 6, col$muted))
+    L <- c(L, .lbl(x_left + (gx(t) - gx(start)) * px_per_bp, y_top + 20, .fmt_bp(t, tick_step), bp = t,
+                   class = "sashimi-ticklabel", `text-anchor` = "middle", `font-size` = "10.5",
+                   `font-family` = "ui-monospace,SFMono-Regular,Menlo,monospace", fill = col$muted))
   }
-  s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-size="11.5" font-weight="600" fill="%s">%s</text>',
-                    x_of(start), y_top + 20, col$ink, chrom))
-  paste(s, collapse = "")
+  FX <- .lbl(gutter_x, y_top + 20, chrom, `font-size` = "11.5", `font-weight` = "600", fill = col$ink)
+  list(geom = paste(s, collapse = ""), labels = paste(L, collapse = ""), fixed = FX)
 }
 
 # --------------------------------------------------------------------------
@@ -244,21 +378,31 @@ sashimi_svg <- function(result, dark = FALSE) {
   # busiest track so arcs/labels actually get more relative room -- ~44px of
   # user-space per junction, enough for a 4-digit monospace label plus a gap.
   # By default the CSS (ui_helpers.R's .l2b-sashimi svg{width:100%}) still
-  # scales the whole thing down to the same on-screen footprint as before
-  # (uniform scaling preserves the now-correct relative spacing, so labels
-  # stop overlapping even though everything renders a bit smaller for a
-  # dense locus) -- this is what actually fixes the collision bug, not just
-  # a cosmetic default. "Expand view" (SASHIMI_JS) then reads data-native-width
-  # below and sets it as an inline pixel width, breaking out of that 100%
-  # squish to show it at full native/readable size with real horizontal
-  # scroll + drag-to-pan for when small text isn't good enough.
+  # scales the whole thing down to the same on-screen footprint as before.
+  # "Expand view" (SASHIMI_JS) then reads data-native-width below and sets it as
+  # an inline pixel width, breaking out of that 100% squish.
   n_junctions <- max(nrow(result$control$junctions), nrow(result$knockdown$junctions))
   W <- max(1240, min(6000, round(n_junctions * 44)))
-  LEFT <- 62; RIGHT <- 26
+  # LEFT is a real gutter, not padding. Track names, the [0 - max] range tag and
+  # the chromosome sit in it, OUTSIDE the clipped data panel, so nothing the
+  # genome layer draws can ever cross them. Before tiling that was survivable:
+  # every arc was fully inside the window, so it never reached the gutter. A
+  # buffered render draws arcs that continue off-screen -- which is the point,
+  # you can see what you are panning towards -- and those swept straight through
+  # the range tag and the track name.
+  LEFT <- 98; RIGHT <- 26; GUTTER_X <- 8
   PAD_TOP <- 20; ARC_H <- 96; COV_H <- 118; TRACK_LBL <- 4
   GAP <- 26; GENE_H <- 74; AXIS_H <- 30
   x_left <- LEFT; x_right <- W - RIGHT
-  x_of <- .x_of_bp(result$start, result$end, x_left, x_right)
+
+  # geometry x = bp - origin (see the two-layer note); the bp -> pixel step is
+  # the <g> transform, and px_per_bp is only needed to place the INITIAL label
+  # positions, since JS recomputes them from data-bp on every move after that.
+  origin <- result$start
+  gx <- .geom_x(origin)
+  gx_lo <- gx(result$start); gx_hi <- gx(result$end)
+  px_per_bp <- .geom_scale(result$start, result$end, x_left, x_right)
+  geom_tf <- .geom_transform(result$start, result$end, origin, x_left, x_right)
 
   y_ctrl <- PAD_TOP
   y_kd    <- y_ctrl + ARC_H + COV_H + GAP
@@ -274,59 +418,107 @@ sashimi_svg <- function(result, dark = FALSE) {
   nj <- result$candidates$novel_junctions
   if (!is.null(nj) && nrow(nj) > 0) novel_keys <- sprintf("%d-%d", nj$start, nj$end)
 
-  # no inline width here -- CSS width:100% (compact, the default) governs
-  # on-screen size unless/until SASHIMI_JS's "Expand view" toggle sets one.
-  #
-  # data-view-*/-x-* let SASHIMI_JS invert a click's screen position back to a
-  # bp coordinate (for double-click-to-zoom) without duplicating .x_of_bp()'s
-  # math in JS; data-orig-*  is the window the "Reset view"/zoom-out-to-full
-  # button returns to, which stays the originally-requested locus across any
-  # number of zoom steps (see app.R's zoom observer, which carries it forward
-  # rather than recomputing it from the current, possibly zoomed, window).
+  # data-* the client navigates by:
+  #   data-origin       absolute bp of geometry x = 0
+  #   data-view-*       the window currently on screen (moves as you pan)
+  #   data-render-*     the window this SVG actually has data for; panning
+  #                     outside it shows nothing, which is what triggers a tile
+  #   data-bin-bp       width of one coverage bin, derived from the coverage
+  #                     vector itself rather than an assumed bin count -- it is
+  #                     what tells the client the picture has stopped being at
+  #                     full resolution and needs a re-read
+  #   data-tile-*       the buffered span the server can serve from cache
+  #   data-orig-*       what "Reset view" returns to -- the originally requested
+  #                     locus, carried forward unchanged through every zoom step
+  #   data-x-left/right the pixel drawing region the transform maps onto
+  # what SASHIMI_JS needs to redraw the strand chevrons at a new view: they are
+  # pixel-spaced decoration, so they cannot simply ride along with the genomic
+  # layer and have to be regenerated from the transcript's span on every move.
+  gene_attrs <- if (is.null(result$transcript)) "" else sprintf(
+    ' data-gene-start="%d" data-gene-end="%d" data-gene-y="%.1f" data-gene-dir="%d" data-gene-col="%s"',
+    min(result$transcript$start), max(result$transcript$end), y_gene + GENE_H / 2 + 6,
+    if (identical(result$transcript$strand[1], "-")) -1L else 1L, COL$intron)
+
   orig_start <- if (is.null(result$orig_start)) result$start else result$orig_start
   orig_end <- if (is.null(result$orig_end)) result$end else result$orig_end
+  tile_start <- if (is.null(result$tile_start)) result$start else result$tile_start
+  tile_end <- if (is.null(result$tile_end)) result$end else result$tile_end
+  view_start <- if (is.null(result$view_start)) result$start else result$view_start
+  view_end <- if (is.null(result$view_end)) result$end else result$view_end
   s <- c(sprintf(paste0(
-    '<svg viewBox="0 0 %d %d" data-native-width="%d" ',
-    'data-view-start="%d" data-view-end="%d" data-orig-start="%d" data-orig-end="%d" ',
-    'data-x-left="%d" data-x-right="%d" ',
+    '<svg viewBox="0 0 %d %d" data-native-width="%d" data-origin="%d" ',
+    'data-view-start="%d" data-view-end="%d" data-render-start="%d" data-render-end="%d" ',
+    'data-tile-start="%d" data-tile-end="%d" data-orig-start="%d" data-orig-end="%d" ',
+    'data-x-left="%d" data-x-right="%d" data-axis-y="%.1f" data-bin-bp="%.4f" data-tick-col="%s" data-ink-col="%s"%s ',
     'xmlns="http://www.w3.org/2000/svg" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" ',
     'role="img" aria-label="IGV-style sashimi plot: control vs knockdown coverage and splice junctions">'),
-    W, H, W, result$start, result$end, orig_start, orig_end, x_left, x_right))
+    W, H, W, origin, view_start, view_end, result$start, result$end,
+    tile_start, tile_end, orig_start, orig_end, x_left, x_right,
+    y_axis, (result$end - result$start) / max(1, length(result$control$coverage)),
+    COL$muted, COL$ink, gene_attrs))
 
-  # panel backdrop
+  # panel backdrop -- pixel space, outside the geometry layer, so it stays put
   s <- c(s, sprintf('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="8" fill="%s" stroke="%s"/>',
-                    x_left - 10, PAD_TOP - 12, (x_right - x_left) + 20, H - PAD_TOP + 6, COL$panel, COL$panel_edge))
+                    x_left, PAD_TOP - 12, x_right - x_left, H - PAD_TOP + 6, COL$panel, COL$panel_edge))
+
+  # clip the genome layer to the drawing region, so panned-in features can't
+  # spill over the gutters where the pinned labels live
+  s <- c(s, sprintf('<defs><clipPath id="sashimi-clip"><rect x="%.1f" y="%.1f" width="%.1f" height="%.1f"/></clipPath></defs>',
+                    x_left, PAD_TOP - 10, x_right - x_left, H - PAD_TOP + 2))
+
+  g <- character(0); L <- character(0); U <- character(0); FX <- character(0)
 
   # candidate-exon highlight bands, spanning every track
   ce <- result$candidates$candidate_exons
   if (!is.null(ce) && nrow(ce) > 0) {
     for (i in seq_len(nrow(ce))) {
-      bx0 <- x_of(ce$start[i]); bx1 <- x_of(ce$end[i])
-      s <- c(s, sprintf(
-        '<rect class="sashimi-ce-band" tabindex="0" role="button" data-start="%d" data-end="%d" data-length="%d" data-kd-reads="%d" data-control-reads="%d" aria-label="Candidate cryptic exon %d-%d, %d bp" x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>',
+      g <- c(g, sprintf(
+        '<rect class="sashimi-ce-band" tabindex="0" role="button" data-start="%d" data-end="%d" data-length="%d" data-kd-reads="%d" data-control-reads="%d" aria-label="Candidate cryptic exon %d-%d, %d bp" x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s" vector-effect="non-scaling-stroke"/>',
         ce$start[i], ce$end[i], ce$length[i], ce$kd_reads[i], ce$control_reads[i], ce$start[i], ce$end[i], ce$length[i],
-        min(bx0, bx1), PAD_TOP - 4, max(2, abs(bx1 - bx0)), y_axis - PAD_TOP, COL$novel_soft))
+        gx(ce$start[i]), PAD_TOP - 4, max(0.01, gx(ce$end[i]) - gx(ce$start[i])), y_axis - PAD_TOP, COL$novel_soft))
     }
   }
 
-  s <- c(s, .track_svg(result$control$coverage, result$control$junctions, x_of, x_left, x_right,
-                       y_ctrl, ARC_H, COV_H, "Control", result$control$n_reads, max_depth, max_reads,
-                       COL, COL$ctrl_fill, COL$ctrl_line, COL$ctrl_arc,
-                       bp_start = result$start, bp_end = result$end))
-  s <- c(s, .track_svg(result$knockdown$coverage, result$knockdown$junctions, x_of, x_left, x_right,
-                       y_kd, ARC_H, COV_H, "Knockdown", result$knockdown$n_reads, max_depth, max_reads,
-                       COL, COL$kd_fill, COL$kd_line, COL$kd_arc, novel_keys = novel_keys,
-                       bp_start = result$start, bp_end = result$end))
+  ctrl <- .track_svg(result$control$coverage, result$control$junctions, gx, gx_lo, gx_hi,
+                     x_left, x_right, y_ctrl, ARC_H, COV_H, "Control", result$control$n_reads,
+                     max_depth, max_reads, COL, COL$ctrl_fill, COL$ctrl_line, COL$ctrl_arc,
+                     bp_start = result$start, bp_end = result$end, px_per_bp = px_per_bp,
+                     gutter_x = GUTTER_X)
+  kdt <- .track_svg(result$knockdown$coverage, result$knockdown$junctions, gx, gx_lo, gx_hi,
+                    x_left, x_right, y_kd, ARC_H, COV_H, "Knockdown", result$knockdown$n_reads,
+                    max_depth, max_reads, COL, COL$kd_fill, COL$kd_line, COL$kd_arc,
+                    novel_keys = novel_keys, bp_start = result$start, bp_end = result$end,
+                    px_per_bp = px_per_bp, gutter_x = GUTTER_X)
+  g <- c(g, ctrl$geom, kdt$geom); L <- c(L, ctrl$labels, kdt$labels); FX <- c(FX, ctrl$fixed, kdt$fixed)
 
   if (!is.null(result$transcript)) {
     note <- if (result$n_other_isoforms > 0) sprintf("+ %d more isoform(s) in region", result$n_other_isoforms) else NULL
-    s <- c(s, .gene_track_svg(result$transcript, x_of, y_gene, GENE_H, COL, note = note))
+    gt <- .gene_track_svg(result$transcript, gx, x_left, y_gene, GENE_H, COL, note = note,
+                          px_per_bp = px_per_bp, view_start = result$start, x_right_px = x_right)
+    g <- c(g, gt$geom); L <- c(L, gt$labels); U <- c(U, gt$underlay)
   } else {
-    s <- c(s, sprintf('<text x="%.1f" y="%.1f" font-size="12" fill="%s">No annotated transcript in this window.</text>',
-                      x_left, y_gene + GENE_H / 2, COL$muted))
+    L <- c(L, .lbl(x_left, y_gene + GENE_H / 2, "No annotated transcript in this window.",
+                   `font-size` = "12", fill = COL$muted))
   }
-  s <- c(s, .axis_svg(result$chrom, result$start, result$end, x_of, y_axis, COL))
+  ax <- .axis_svg(result$chrom, result$start, result$end, gx, x_left, x_right, y_axis, COL,
+                  px_per_bp = px_per_bp, gutter_x = GUTTER_X)
+  g <- c(g, ax$geom); L <- c(L, ax$labels); FX <- c(FX, ax$fixed)
 
+  # NOTE: the clip lives on an OUTER, untransformed <g>, not on the geometry
+  # group itself. clipPathUnits="userSpaceOnUse" resolves in the coordinate
+  # system of the element that REFERENCES the clip -- which, for an element
+  # carrying its own transform, is the post-transform space. Putting both on one
+  # <g> silently scales the clip rectangle by sx too, collapsing the whole figure
+  # into the left ~200px. Two groups keeps the clip in pixels and the genome in bp.
+  s <- c(s, '<g class="sashimi-underlay">', U, '</g>')
+  s <- c(s, '<g clip-path="url(#sashimi-clip)">',
+         sprintf('<g class="sashimi-geom" transform="%s">', geom_tf),
+         g, '</g></g>')
+  # Two label layers, and the split is what makes panning cheap: .sashimi-labels
+  # is bp-anchored and can be moved as a whole with one transform during a drag,
+  # while .sashimi-labels-fixed is gutter furniture that must never move.
+  s <- c(s, '<g class="sashimi-labels">', L, '</g>')
+  s <- c(s, '<g class="sashimi-labels-fixed">', FX, '</g>')
   s <- c(s, '</svg>')
   paste(s, collapse = "")
 }
@@ -441,7 +633,6 @@ SASHIMI_JS <- "
   }
   .sashimi-junction.selected .sashimi-junction-arc { stroke-width:5 !important; }
   .sashimi-junction:focus-visible { outline:2px solid #7c6cf0; outline-offset:2px; }
-  .sashimi-hover-bin { cursor:crosshair; }
   .sashimi-ce-band { cursor:pointer; transition: stroke .15s ease; stroke:transparent; stroke-width:2px; }
   @media (prefers-reduced-motion: no-preference) {
     .sashimi-ce-band:hover, .sashimi-ce-band:focus-visible { stroke:#7c6cf0; }
@@ -459,8 +650,35 @@ SASHIMI_JS <- "
     display:inline-block; margin-top:6px; color:#8f7dfa; font-weight:600; pointer-events:auto;
   }
   #l2b-sashimi-tooltip a { color:inherit; }
-  .l2b-sashimi { cursor:grab; }
+  .l2b-sashimi { cursor:grab; position:relative; }
+  /* Compositor hints. The genome layer and the label layer are the only two
+     things that move during a pan, and both move by transform alone -- promoting
+     them keeps that on the compositor instead of forcing a full re-raster of a
+     figure with thousands of paths in it. contain:paint tells the browser nothing
+     inside can affect layout outside, so a pan can't trigger reflow of the page. */
+  .l2b-sashimi svg { contain:paint; }
+  .sashimi-geom, .sashimi-labels, .sashimi-underlay { will-change:transform; }
+  .sashimi-labels, .sashimi-labels-fixed, .sashimi-underlay { pointer-events:none; }
+  .sashimi-cov-hit { pointer-events:all; cursor:crosshair; }
+  /* Text stays crisp and is never selected mid-drag. */
+  .l2b-sashimi text { user-select:none; -webkit-user-select:none; }
   .l2b-sashimi.l2b-sashimi-dragging { cursor:grabbing; user-select:none; }
+  /* Stale-with-spinner, never blank: a tile is fetched while the CURRENT
+     figure stays on screen and stays interactive. Blanking the plot to show a
+     loader would throw away the thing the user is reading in order to tell
+     them it is being improved. */
+  .l2b-sashimi-loading::after {
+    content:'loading finer detail'; position:absolute; top:8px; right:12px;
+    font-size:11px; letter-spacing:.02em; padding:3px 9px; border-radius:999px;
+    background:var(--l2b-glass,rgba(23,28,48,.72)); color:var(--l2b-text,#e9ecf5);
+    border:1px solid var(--l2b-glass-border,rgba(174,182,230,.18));
+    backdrop-filter:blur(10px); pointer-events:none; opacity:.92;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .l2b-sashimi-loading::after { animation:l2bSashimiPulse 1.1s ease-in-out infinite; }
+    @keyframes l2bSashimiPulse { 0%,100%{opacity:.45} 50%{opacity:.95} }
+  }
+  #sashimi_locus_readout { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
   .l2b-sashimi:fullscreen, .l2b-sashimi:-webkit-full-screen {
     display:flex; align-items:center; padding:28px;
     background:var(--l2b-page-bg, var(--l2b-surface, #0b0e1a));
@@ -468,36 +686,6 @@ SASHIMI_JS <- "
   .l2b-sashimi:fullscreen svg, .l2b-sashimi:-webkit-full-screen svg { min-width:0; }
 </style>
 <script>
-(function(){
-  // click-and-drag panning -- the figure is only ever wider than its
-  // container (see sashimi_svg()'s inline width style) for junction-dense
-  // loci, at which point overflow-x:auto alone only gives a scrollbar; this
-  // is what the figure caption's 'drag to scroll' has always promised.
-  // A plain click (no movement past the threshold) is left alone so pinning
-  // a junction/candidate-exon tooltip still works; an actual drag swallows
-  // the click that follows mouseup so it doesn't also pin/unpin underneath.
-  document.addEventListener('mousedown', function(e){
-    var box = e.target.closest ? e.target.closest('.l2b-sashimi') : null;
-    if (!box || e.button !== 0) return;
-    var startX = e.pageX, startScroll = box.scrollLeft, dragged = false;
-    function onMove(e2){
-      var dx = e2.pageX - startX;
-      if (!dragged && Math.abs(dx) > 4) { dragged = true; box.classList.add('l2b-sashimi-dragging'); }
-      if (dragged) { box.scrollLeft = startScroll - dx; e2.preventDefault(); }
-    }
-    function onUp(){
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      box.classList.remove('l2b-sashimi-dragging');
-      if (dragged) {
-        var swallow = function(ce){ ce.stopPropagation(); ce.preventDefault(); };
-        document.addEventListener('click', swallow, { capture: true, once: true });
-      }
-    }
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
-})();
 (function(){
   function ensureTooltip(){
     var t = document.getElementById('l2b-sashimi-tooltip');
@@ -537,8 +725,13 @@ SASHIMI_JS <- "
       if (novel && isPinned) html += designLink('junction', d.start, d.end);
       return html;
     }
-    if (el.classList.contains('sashimi-hover-bin')) {
-      return fmt(d.position) + ' bp<br>depth ' + d.depth + ' (' + d.track + ')';
+    if (el.classList.contains('sashimi-cov-hit')) {
+      var bpAt = el.__bp, arr = el.__cov;
+      if (!arr) { arr = el.__cov = d.cov.split(',').map(Number); }
+      var s0 = Number(d.bpStart), s1 = Number(d.bpEnd);
+      var i = Math.floor((bpAt - s0) / ((s1 - s0) / arr.length));
+      if (i < 0) i = 0; if (i >= arr.length) i = arr.length - 1;
+      return fmt(Math.round(bpAt)) + ' bp<br>depth ' + arr[i] + ' (' + d.track + ')';
     }
     if (el.classList.contains('sashimi-ce-band')) {
       var ceHtml = '<b>Candidate cryptic exon</b><br>' + fmt(d.start) + '–' + fmt(d.end) +
@@ -575,20 +768,30 @@ SASHIMI_JS <- "
     if (!pinned) return;
     pinned.classList.remove('selected'); pinned = null; hideTooltip();
   }
-  var HOVERABLE = '.sashimi-junction, .sashimi-hover-bin, .sashimi-ce-band, .sashimi-exon';
+  var HOVERABLE = '.sashimi-junction, .sashimi-cov-hit, .sashimi-ce-band, .sashimi-exon';
   function targetEl(evt){
     return evt.target.closest ? evt.target.closest(HOVERABLE) : null;
   }
 
   document.addEventListener('mouseover', function(e){
     var el = targetEl(e);
-    if (el && !pinned) showTooltip(el, e, false);
+    if (el && !pinned) {
+      if (el.classList.contains('sashimi-cov-hit')) el.__bp = bpAtClientX(el.ownerSVGElement, e.clientX);
+      showTooltip(el, e, false);
+    }
   });
   document.addEventListener('mousemove', function(e){
     if (pinned) return;
     var el = targetEl(e);
     var t = document.getElementById('l2b-sashimi-tooltip');
-    if (el && t && t.style.display === 'block') positionTooltip(t, e);
+    if (el && t && t.style.display === 'block') {
+      // the coverage readout tracks the pointer, so it re-resolves as you move
+      if (el.classList.contains('sashimi-cov-hit')) {
+        el.__bp = bpAtClientX(el.ownerSVGElement, e.clientX);
+        t.innerHTML = contentFor(el, false);
+      }
+      positionTooltip(t, e);
+    }
   });
   document.addEventListener('mouseout', function(e){
     var to = e.relatedTarget;
@@ -626,46 +829,457 @@ SASHIMI_JS <- "
   function exitFs(){ (document.exitFullscreen || document.webkitExitFullscreen || function(){}).call(document); }
   function fsElement(){ return document.fullscreenElement || document.webkitFullscreenElement || null; }
 
-  // IGV-style zoom: re-runs detection at a new window (app.R's
-  // cryptic_zoom_to observer, via run_cryptic_detection() against the
-  // already-resolved/cached BAMs -- see R/cryptic_exon_bam.R) rather than
-  // anything client-side, since the coverage/junctions/candidates all
-  // genuinely depend on which window is being read.
+  // ----------------------------------------------------------------------
+  // LIVE NAVIGATION
+  //
+  // Panning and zooming are pure client-side attribute writes: one transform
+  // on .sashimi-geom, plus repositioning the pixel-space labels from their
+  // data-bp. Nothing here asks the server for a picture. The server is only
+  // involved when the view runs out of DATA -- either off the edge of what was
+  // rendered, or zoomed in past the resolution the current bins can honestly
+  // support -- and that is a tile request, not a re-render.
+  //
+  // Two invariants worth keeping:
+  //   * the DOM box size never enters the math. sx is computed in viewBox user
+  //     units, so a drag-resized or expanded figure pans identically.
+  //   * a view is never allowed outside the RENDERED window. Panning into a
+  //     region with no data would show an empty plot that looks like a result.
+  // ----------------------------------------------------------------------
   var MIN_ZOOM_BP = 40;
-  function sendZoom(start, end){
-    if (end - start < MIN_ZOOM_BP) {
-      var mid = (start + end) / 2; start = mid - MIN_ZOOM_BP / 2; end = mid + MIN_ZOOM_BP / 2;
-    }
-    if (start < 1) { end += (1 - start); start = 1; }
-    if (window.Shiny && Shiny.setInputValue) {
-      Shiny.setInputValue('cryptic_zoom_to', { start: Math.round(start), end: Math.round(end) }, { priority: 'event' });
+  function figBox(){ return document.querySelector('.l2b-sashimi'); }
+  function figSvg(){ var b = figBox(); return b && b.querySelector('svg'); }
+  function num(svg, k){ return Number(svg.dataset[k]); }
+  function currentView(svg){ return { start: num(svg,'viewStart'), end: num(svg,'viewEnd') }; }
+  function renderWin(svg){ return { start: num(svg,'renderStart'), end: num(svg,'renderEnd') }; }
+  function geomG(svg){ return svg.querySelector('.sashimi-geom'); }
+  function scaleFor(svg, start, end){
+    return (num(svg,'xRight') - num(svg,'xLeft')) / Math.max(1, end - start);
+  }
+
+  // .nice_ticks() / .fmt_bp() from sashimi_plot.R. Duplicated on purpose and
+  // unavoidably: the static export has no JS, and the live view has no server.
+  // Change the stepping in one, change it in the other.
+  function niceTicks(lo, hi, target){
+    target = target || 9;
+    var span = Math.max(1, hi - lo), raw = span / target;
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), norm = raw / mag;
+    var step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+    var out = [];
+    for (var t = Math.ceil(lo / step) * step; t <= hi; t += step) out.push(t);
+    return out;
+  }
+  function fmtBp(bp, step){
+    if (!(step > 0)) step = Math.max(1, bp / 100);
+    var dec = function(div){ return Math.max(0, Math.ceil(-Math.log(step / div) / Math.LN10)); };
+    if (bp >= 1e6 && step >= 1e4) return (bp / 1e6).toFixed(dec(1e6)) + ' Mb';
+    if (bp >= 1e3 && step >= 10) return (bp / 1e3).toFixed(dec(1e3)) + ' kb';
+    return Math.round(bp).toLocaleString();
+  }
+  function svgEl(name, attrs){
+    var e = document.createElementNS('http://www.w3.org/2000/svg', name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  // The ruler is rebuilt, not panned: the round numbers themselves change as
+  // you zoom, and a ruler that slid its old labels along would be worse than
+  // no ruler at all.
+  function rebuildAxis(svg, start, end, pxOf){
+    var g = geomG(svg), labels = svg.querySelector('.sashimi-labels');
+    if (!g || !labels) return;
+    var origin = num(svg,'origin'), y = num(svg,'axisY'), col = svg.dataset.tickCol;
+    Array.prototype.forEach.call(g.querySelectorAll('.sashimi-tick'), function(n){ n.remove(); });
+    Array.prototype.forEach.call(labels.querySelectorAll('.sashimi-ticklabel'), function(n){ n.remove(); });
+    var ticks = niceTicks(start, end);
+    var step = ticks.length > 1 ? ticks[1] - ticks[0] : Math.max(1, (end - start) / 9);
+    ticks.forEach(function(t){
+      var gxv = t - origin;
+      g.appendChild(svgEl('line', { 'class':'sashimi-tick', x1:gxv, y1:y, x2:gxv, y2:y + 6,
+        stroke:col, 'stroke-width':'1.2', 'vector-effect':'non-scaling-stroke' }));
+      var tl = svgEl('text', { 'class':'sashimi-lbl sashimi-ticklabel', 'data-bp':Math.round(t),
+        x:pxOf(t).toFixed(1), y:y + 20, 'text-anchor':'middle', 'font-size':'10.5',
+        'font-family':'ui-monospace,SFMono-Regular,Menlo,monospace', fill:col });
+      tl.textContent = fmtBp(t, step);
+      labels.appendChild(tl);
+    });
+  }
+
+  // Strand chevrons are spaced in PIXELS along the visible part of the intron
+  // line, so they have to be regenerated rather than transformed.
+  function rebuildChevrons(svg, start, end, pxOf){
+    var under = svg.querySelector('.sashimi-underlay');
+    if (!under) return;
+    Array.prototype.forEach.call(under.querySelectorAll('.sashimi-chevron'), function(n){ n.remove(); });
+    if (!svg.dataset.geneStart) return;
+    var gs = num(svg,'geneStart'), ge = num(svg,'geneEnd');
+    var yMid = num(svg,'geneY'), dir = num(svg,'geneDir'), col = svg.dataset.geneCol;
+    var x0 = num(svg,'xLeft'), x1 = num(svg,'xRight');
+    var pl = Math.max(x0, pxOf(gs)), pr = Math.min(x1, pxOf(ge));
+    if (pr - pl <= 40) return;
+    for (var cx = pl + 26; cx <= pr - 14; cx += 46) {
+      under.appendChild(svgEl('path', { 'class':'sashimi-chevron', fill:'none', stroke:col,
+        'stroke-width':'1.4',
+        d:'M ' + (cx - 4*dir) + ',' + (yMid - 4) + ' L ' + (cx + 4*dir) + ',' + yMid +
+          ' L ' + (cx - 4*dir) + ',' + (yMid + 4) }));
     }
   }
-  function currentView(svg){ return { start: Number(svg.dataset.viewStart), end: Number(svg.dataset.viewEnd) }; }
+
+  // The whole of panning and zooming, in one function.
+  //
+  // opts.silent suppresses the settle ping. Used on the very first apply after
+  // a fresh figure arrives: the server has just computed the tables for exactly
+  // this window, so asking it to recompute them would be a pointless round trip.
+  function applyView(svg, start, end, opts){
+    var r = renderWin(svg);
+    var span = Math.max(MIN_ZOOM_BP, end - start);
+    // never show a window we have no data for
+    if (span > r.end - r.start) { span = r.end - r.start; start = r.start; }
+    else {
+      if (start < r.start) start = r.start;
+      if (start + span > r.end) start = r.end - span;
+    }
+    end = start + span;
+
+    var origin = num(svg,'origin'), x0 = num(svg,'xLeft'), x1 = num(svg,'xRight');
+    var sx = (x1 - x0) / Math.max(1, span);
+    var tx = x0 - (start - origin) * sx;
+    geomG(svg).setAttribute('transform', 'translate(' + tx.toFixed(4) + ',0) scale(' + sx.toFixed(10) + ',1)');
+    svg.dataset.viewStart = Math.round(start);
+    svg.dataset.viewEnd = Math.round(end);
+
+    var moving = svg.querySelector('.sashimi-labels');
+    var under = svg.querySelector('.sashimi-underlay');
+    var laidOutAt = Number(svg.dataset.laidOutStart);
+    var laidOutSx = Number(svg.dataset.laidOutSx);
+    // FAST PATH: a pure pan leaves the scale alone, so every pixel-space label
+    // has moved by exactly the same number of pixels. One transform on the label
+    // layer and one on the underlay reproduces that -- two attribute writes
+    // instead of repositioning ~60 elements and rebuilding the ruler from
+    // scratch. Tick marks live in the genome layer and so are already correct;
+    // their labels ride along, which is also correct under a pure translation.
+    var canFast = opts && opts.fast && laidOutSx && Math.abs(sx - laidOutSx) < 1e-12;
+    if (canFast) {
+      var dx = (laidOutAt - start) * sx;
+      var t = 'translate(' + dx.toFixed(3) + ',0)';
+      if (moving) moving.setAttribute('transform', t);
+      if (under) under.setAttribute('transform', t);
+      updateStickyGeneLabels(svg, start, sx, x0, x1, dx);
+      updateLocusReadout(svg, start, end);
+      return;
+    }
+
+    // FULL PATH: scale changed, or movement has stopped. Re-nice the ruler and
+    // put every label back where it belongs, then clear the group transforms.
+    if (moving) moving.removeAttribute('transform');
+    if (under) under.removeAttribute('transform');
+    svg.dataset.laidOutStart = start;
+    svg.dataset.laidOutSx = sx;
+
+    var pxOf = function(bp){ return x0 + (bp - start) * sx; };
+    var lbls = svg.querySelectorAll('.sashimi-labels .sashimi-lbl[data-bp]');
+    for (var i = 0; i < lbls.length; i++) {
+      var el = lbls[i];
+      if (el.classList.contains('sashimi-ticklabel')) continue;   // rebuilt below
+      var x = pxOf(Number(el.dataset.bp)) + (Number(el.dataset.dx) || 0);
+      if (el.dataset.clamp === 'start') x = Math.max(x0, Math.min(x, x1 - 240));
+      else if (el.dataset.clamp === 'end') x = Math.min(x1 - 6, Math.max(x, x0 + 40));
+      el.setAttribute('x', x.toFixed(1));
+      if (!el.dataset.clamp) el.style.display = (x < x0 - 60 || x > x1 + 60) ? 'none' : '';
+    }
+    hideCollidingGeneNote(svg);
+    rebuildAxis(svg, start, end, pxOf);
+    rebuildChevrons(svg, start, end, pxOf);
+    updateLocusReadout(svg, start, end);
+    scheduleTileCheck(svg);
+    if (!(opts && opts.silent)) scheduleSettle(svg);
+  }
+
+  // The two sticky gene labels are clamped rather than translated, so the fast
+  // path has to nudge them by hand -- but that is two elements, not sixty.
+  function updateStickyGeneLabels(svg, start, sx, x0, x1, dx){
+    var els = svg.querySelectorAll('.sashimi-labels .sashimi-lbl[data-clamp]');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var x = x0 + (Number(el.dataset.bp) - start) * sx;
+      if (el.dataset.clamp === 'start') x = Math.max(x0, Math.min(x, x1 - 240));
+      else x = Math.min(x1 - 6, Math.max(x, x0 + 40));
+      el.setAttribute('x', (x - dx).toFixed(1));   // undo the group translate
+    }
+    hideCollidingGeneNote(svg);
+  }
+
+  // Both sticky gene labels clamp inward, so a transcript wider than the view
+  // pins the name left and the isoform note right -- in a narrow view they meet
+  // and overprint. The note is the expendable one.
+  function hideCollidingGeneNote(svg){
+    var nameEl = svg.querySelector('.sashimi-lbl[data-clamp=\"start\"]');
+    var noteEl = svg.querySelector('.sashimi-lbl[data-clamp=\"end\"]');
+    if (!nameEl || !noteEl) return;
+    var gap = Number(noteEl.getAttribute('x')) - Number(nameEl.getAttribute('x'));
+    noteEl.style.display = gap < 300 ? 'none' : '';
+  }
+
+  // Every view change goes through one requestAnimationFrame. A trackpad can
+  // deliver wheel/mousemove events faster than the display refreshes, and doing
+  // the work per event rather than per frame is how you get a figure that is
+  // busy but not smooth. Only the newest requested view survives to paint.
+  var rafPending = null, rafId = 0;
+  function requestView(svg, start, end, fast){
+    rafPending = { svg: svg, start: start, end: end, fast: fast };
+    if (rafId) return;
+    rafId = requestAnimationFrame(function(){
+      rafId = 0;
+      var p = rafPending; rafPending = null;
+      if (p) applyView(p.svg, p.start, p.end, { fast: p.fast });
+      if (p && p.fast) scheduleRelayout(p.svg);
+    });
+  }
+  // After movement stops, do the full pass once: re-nice the ruler, re-place the
+  // labels, and let the server know where we ended up.
+  var relayoutTimer = null;
+  function scheduleRelayout(svg){
+    if (relayoutTimer) clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(function(){
+      var v = currentView(svg);
+      applyView(svg, v.start, v.end);
+    }, 90);
+  }
+
+  // A fresh figure is rendered by R over the whole BUFFER, with the window the
+  // user actually asked for carried in data-view-*. Zooming from one to the
+  // other is what puts the requested locus on screen; without it you would see
+  // the buffer, which is 3x too wide and not what was asked for.
+  function initView(svg){
+    if (!svg || svg.dataset.viewInit === '1') return;
+    svg.dataset.viewInit = '1';
+    applyView(svg, num(svg,'viewStart'), num(svg,'viewEnd'), { silent: true });
+  }
+
+  function updateLocusReadout(svg, start, end){
+    var el = document.getElementById('sashimi_locus_readout');
+    if (!el) return;
+    var chrom = el.dataset.chrom || '';
+    el.textContent = chrom + ':' + Math.round(start).toLocaleString() + '-' +
+                     Math.round(end).toLocaleString() +
+                     '  (' + ((end - start) / 1000).toFixed(1) + ' kb)';
+  }
+
+  function panBy(svg, dBp){ var v = currentView(svg); requestView(svg, v.start + dBp, v.end + dBp, true); }
+  function zoomAt(svg, bp, factor){
+    var v = currentView(svg), span = (v.end - v.start) * factor;
+    var frac = (bp - v.start) / Math.max(1, v.end - v.start);
+    requestView(svg, bp - frac * span, bp + (1 - frac) * span, false);
+  }
   function zoomBy(svg, factor){
-    var v = currentView(svg), mid = (v.start + v.end) / 2, w = (v.end - v.start) * factor;
-    sendZoom(mid - w / 2, mid + w / 2);
-  }
-  // invert a click's screen X back to a bp coordinate, using the SVG's own
-  // coordinate-transform matrix rather than duplicating .x_of_bp()'s math in
-  // JS -- correct regardless of compact/expanded scale or container scroll.
-  function bpAtClientX(svg, clientX){
-    var pt = svg.createSVGPoint(); pt.x = clientX; pt.y = 0;
-    var loc = pt.matrixTransform(svg.getScreenCTM().inverse());
-    var xLeft = Number(svg.dataset.xLeft), xRight = Number(svg.dataset.xRight);
     var v = currentView(svg);
-    var frac = (loc.x - xLeft) / (xRight - xLeft);
-    return v.start + frac * (v.end - v.start);
+    zoomAt(svg, (v.start + v.end) / 2, factor);
   }
+
+  // invert a click's screen X back to a bp coordinate using the geometry
+  // group's own transform matrix, rather than duplicating the mapping in JS --
+  // correct regardless of compact/expanded scale, container scroll, or zoom.
+  function bpAtClientX(svg, clientX){
+    var g = geomG(svg); if (!g) return currentView(svg).start;
+    var pt = svg.createSVGPoint(); pt.x = clientX; pt.y = 0;
+    var loc = pt.matrixTransform(g.getScreenCTM().inverse());
+    return loc.x + num(svg,'origin');
+  }
+
+  // ----------------------------------------------------------------------
+  // TILES -- the only thing that goes back to the server.
+  //
+  // Requested on APPROACH, not arrival: when the view gets within 25% of a
+  // render-window edge, or when the view is zoomed in far enough that the
+  // rendered bins are coarser than the pixels showing them (the honest
+  // equivalent of a density-threshold crossing -- at that point the picture
+  // is no longer at full resolution and only a re-read can fix it).
+  //
+  // Every request carries a token. The server echoes it back with the tile,
+  // and a tile whose token is not the newest is dropped on arrival without
+  // rendering and without an error -- see the message handler below.
+  // ----------------------------------------------------------------------
+  var tileToken = 0, tileTimer = null, tilePending = null, lastTileKey = null;
+  function needsTile(svg){
+    var v = currentView(svg), r = renderWin(svg);
+    var span = v.end - v.start, margin = span * 0.25;
+    if (v.start - r.start < margin && r.start > 1) return true;
+    if (r.end - v.end < margin) return true;
+    // Under-resolved: one coverage bin covers more than ~2 SCREEN PIXELS, i.e.
+    // the wiggle has visibly become a staircase and no longer shows the depth it
+    // claims to. Only a re-read at finer bins fixes that -- the client must never
+    // smooth it, because an interpolated coverage track is an invented measurement.
+    //
+    // Screen pixels, NOT viewBox user units. sashimi_svg() scales the viewBox
+    // width with junction count (up to 6000 units), so a junction-dense locus has
+    // a huge user-space width that no achievable bin count can ever satisfy --
+    // the test stayed true no matter what came back, so the client asked for tile
+    // after tile forever and the 'loading finer detail' badge never cleared. That
+    // was visible on UNC13A, which is exactly the locus this tool exists for.
+    var px = svg.getBoundingClientRect().width;
+    if (!(px > 0)) return false;
+    return num(svg,'binBp') > (span / px) * 2;
+  }
+  function scheduleTileCheck(svg){
+    if (!window.Shiny || !Shiny.setInputValue) return;
+    if (!needsTile(svg)) return;
+    if (tileTimer) clearTimeout(tileTimer);
+    // only the newest request survives; an in-flight one is superseded rather
+    // than queued, so a fast drag across a gene issues one tile, not thirty
+    tileTimer = setTimeout(function(){
+      var v = currentView(svg);
+      // Belt and braces against the loop above: a window we have already been
+      // served is never requested again. Without this, any future mistake in
+      // needsTile() becomes an infinite round trip rather than one wasted one.
+      var key = Math.round(v.start) + '-' + Math.round(v.end);
+      if (key === lastTileKey) return;
+      lastTileKey = key;
+      tileToken += 1;
+      tilePending = tileToken;
+      var box = figBox(); if (box) box.classList.add('l2b-sashimi-loading');
+      Shiny.setInputValue('cryptic_tile_request',
+        { start: Math.round(v.start), end: Math.round(v.end), token: tileToken },
+        { priority: 'event' });
+      // The badge is a promise that something is happening. If a reply never
+      // arrives -- dropped as stale, or an error server-side -- clear it rather
+      // than leaving a spinner running over a figure that is not loading.
+      setTimeout(function(){
+        if (tilePending === null) return;
+        var b = figBox(); if (b) b.classList.remove('l2b-sashimi-loading');
+      }, 8000);
+    }, 120);
+  }
+
+  // On settle, ask the server to recompute the RESULT TABLES for the window
+  // now on screen. Pure arithmetic over the cached tile -- no BAM read, no
+  // network -- so the counts under the plot keep meaning what is in view.
+  var settleTimer = null;
+  function scheduleSettle(svg){
+    if (!window.Shiny || !Shiny.setInputValue) return;
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(function(){
+      var v = currentView(svg);
+      Shiny.setInputValue('cryptic_view_settled',
+        { start: Math.round(v.start), end: Math.round(v.end), token: tileToken },
+        { priority: 'event' });
+    }, 250);
+  }
+
+  // A tile arrives as replacement markup for the three layers plus fresh root
+  // data-*. It is swapped in place rather than re-rendered through Shiny, so
+  // the pinned tooltip, the filter slider, the drag-resized height and the
+  // scroll position all survive -- and, critically, so the view the user is
+  // looking at does not jump.
+  if (window.Shiny && Shiny.addCustomMessageHandler) {
+    Shiny.addCustomMessageHandler('sashimiTile', function(msg){
+      var svg = figSvg(); if (!svg) return;
+      if (tilePending !== null && msg.token !== tilePending) return;  // stale: drop silently
+      tilePending = null;
+      var box = figBox(); if (box) box.classList.remove('l2b-sashimi-loading');
+      var keep = currentView(svg);
+      var holder = document.createElement('div');
+      holder.innerHTML = msg.svg;
+      var fresh = holder.querySelector('svg');
+      if (!fresh) return;
+      svg.parentNode.replaceChild(fresh, svg);
+      fresh.dataset.viewInit = '1';
+      applyView(fresh, keep.start, keep.end, { silent: true });
+      restoreFilterControls(); applyFilter(); applyPreserveAspectRatio();
+    });
+  }
+
+  function requestTile(start, end){
+    if (!window.Shiny || !Shiny.setInputValue) return;
+    lastTileKey = Math.round(start) + '-' + Math.round(end);
+    tileToken += 1; tilePending = tileToken;
+    var box = figBox(); if (box) box.classList.add('l2b-sashimi-loading');
+    Shiny.setInputValue('cryptic_tile_request',
+      { start: Math.round(start), end: Math.round(end), token: tileToken },
+      { priority: 'event' });
+  }
+  function resetView(svg){
+    var os = num(svg,'origStart'), oe = num(svg,'origEnd'), r = renderWin(svg);
+    if (os >= r.start && oe <= r.end) applyView(svg, os, oe); else requestTile(os, oe);
+  }
+
+  // Drag to pan the GENOME (this used to scroll the container). dBp is derived
+  // from the drag's total offset against the view at mousedown rather than
+  // accumulated per move, so a long drag can't drift. A plain click is left
+  // alone so pinning a tooltip still works; a real drag swallows the click that
+  // follows mouseup so it doesn't also pin/unpin underneath.
+  document.addEventListener('mousedown', function(e){
+    var box = e.target.closest ? e.target.closest('.l2b-sashimi') : null;
+    if (!box || e.button !== 0) return;
+    if (e.target.closest('.l2b-sashimi-resize-handle')) return;
+    var svg = box.querySelector('svg'); if (!svg) return;
+    var v0 = currentView(svg), sx = scaleFor(svg, v0.start, v0.end);
+    var ctm = svg.getScreenCTM();
+    var unitsPerPx = (ctm && ctm.a) ? 1 / ctm.a : 1;
+    var startX = e.pageX, dragged = false;
+    function onMove(e2){
+      var dx = e2.pageX - startX;
+      if (!dragged && Math.abs(dx) > 4) { dragged = true; box.classList.add('l2b-sashimi-dragging'); }
+      if (!dragged) return;
+      e2.preventDefault();
+      var dBp = -(dx * unitsPerPx) / sx;
+      requestView(svg, v0.start + dBp, v0.end + dBp, true);
+    }
+    function onUp(){
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      box.classList.remove('l2b-sashimi-dragging');
+      if (dragged) {
+        var swallow = function(ce){ ce.stopPropagation(); ce.preventDefault(); };
+        document.addEventListener('click', swallow, { capture: true, once: true });
+      }
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // ctrl/cmd + wheel zooms at the cursor. Deliberately NOT plain wheel: this
+  // figure is embedded in a scrolling page, and swallowing the page scroll
+  // whenever the pointer happens to cross the plot is worse than one modifier.
+  // Horizontal trackpad swipe pans; ctrl/cmd + wheel zooms at the cursor.
+  // Plain vertical wheel is left to the page on purpose -- a figure that eats
+  // page scroll whenever the pointer crosses it is worse than one modifier.
+  document.addEventListener('wheel', function(e){
+    var box = e.target.closest ? e.target.closest('.l2b-sashimi') : null;
+    if (!box) return;
+    var svg = box.querySelector('svg'); if (!svg) return;
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      zoomAt(svg, bpAtClientX(svg, e.clientX), e.deltaY > 0 ? 1.18 : 1 / 1.18);
+      return;
+    }
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 0.5) {
+      e.preventDefault();
+      var v = currentView(svg), sx = scaleFor(svg, v.start, v.end);
+      var ctm = svg.getScreenCTM();
+      var dBp = (e.deltaX * ((ctm && ctm.a) ? 1 / ctm.a : 1)) / sx;
+      requestView(svg, v.start + dBp, v.end + dBp, true);
+    }
+  }, { passive: false });
 
   document.addEventListener('dblclick', function(e){
     var box = e.target.closest ? e.target.closest('.l2b-sashimi') : null;
     if (!box) return;
     var svg = box.querySelector('svg'); if (!svg) return;
     e.preventDefault();
-    var bp = bpAtClientX(svg, e.clientX);
-    var v = currentView(svg), w = (v.end - v.start) / 3;
-    sendZoom(bp - w / 2, bp + w / 2);
+    zoomAt(svg, bpAtClientX(svg, e.clientX), 1 / 3);
+  });
+
+  // keyboard navigation, for the same reason the junctions/exons are
+  // tabindex-able: this has to be usable without a mouse
+  document.addEventListener('keydown', function(e){
+    var box = figBox(); if (!box) return;
+    if (!box.contains(document.activeElement) && document.activeElement !== document.body) return;
+    var svg = box.querySelector('svg'); if (!svg) return;
+    var v = currentView(svg), span = v.end - v.start;
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); panBy(svg, -span * 0.15); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); panBy(svg,  span * 0.15); }
+    else if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomBy(svg, 1 / 1.5); }
+    else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(svg, 1.5); }
+    else if (e.key === '0') { e.preventDefault(); resetView(svg); }
   });
 
   document.addEventListener('click', function(e){
@@ -684,18 +1298,18 @@ SASHIMI_JS <- "
     }
     var ziBtn = e.target.closest ? e.target.closest('.sashimi-zoom-in') : null;
     if (ziBtn) {
-      var svgZi = document.querySelector('.l2b-sashimi svg');
+      var svgZi = figSvg();
       if (svgZi) zoomBy(svgZi, 1 / 3); return;
     }
     var zoBtn = e.target.closest ? e.target.closest('.sashimi-zoom-out') : null;
     if (zoBtn) {
-      var svgZo = document.querySelector('.l2b-sashimi svg');
+      var svgZo = figSvg();
       if (svgZo) zoomBy(svgZo, 3); return;
     }
     var zrBtn = e.target.closest ? e.target.closest('.sashimi-zoom-reset') : null;
     if (zrBtn) {
-      var svgZr = document.querySelector('.l2b-sashimi svg');
-      if (svgZr) sendZoom(Number(svgZr.dataset.origStart), Number(svgZr.dataset.origEnd));
+      var svgZr = figSvg();
+      if (svgZr) resetView(svgZr);
       return;
     }
     var link = e.target.closest ? e.target.closest('.sashimi-design-link') : null;
@@ -734,6 +1348,118 @@ SASHIMI_JS <- "
          document.activeElement.classList.contains('sashimi-exon'))) {
       e.preventDefault(); document.activeElement.click();
     }
+  });
+
+  // ----------------------------------------------------------------------
+  // WORKSPACE CHROME (full-app takeover)
+  //
+  // The nav is hidden rather than deleted, and this is the way back to it --
+  // a full-screen tool with no exit is a trap. Escape closes whatever is open,
+  // outermost last, which is the behaviour every drawer on every platform has
+  // and the one people try first.
+  // ----------------------------------------------------------------------
+  // The takeover sizes the shell as calc(100vh - topbar). The topbar's height
+  // depends on the brand block and the viewport, so it is measured rather than
+  // hardcoded -- a wrong constant here shows up as the figure being clipped or
+  // the page gaining a scrollbar it should not have.
+  function syncTopbarH(){
+    var tb = document.querySelector('.l2b-topbar');
+    if (tb) document.documentElement.style.setProperty('--l2b-topbar-h',
+      Math.round(tb.getBoundingClientRect().height) + 'px');
+  }
+  window.addEventListener('resize', syncTopbarH);
+  window.addEventListener('load', syncTopbarH);
+  syncTopbarH();
+
+  document.addEventListener('click', function(e){
+    if (!e.target.closest) return;
+    if (e.target.closest('#cryptic_nav_toggle')) {
+      document.body.classList.toggle('l2b-nav-open'); return;
+    }
+    if (e.target.closest('.l2b-igv-drawer-toggle')) {
+      document.body.classList.toggle('l2b-igv-drawer-open'); return;
+    }
+    if (e.target.closest('.l2b-igv-scrim')) {
+      document.body.classList.remove('l2b-igv-drawer-open'); return;
+    }
+    if (e.target.closest('.l2b-igv-dock-toggle')) {
+      var closed = document.body.classList.toggle('l2b-igv-dock-closed');
+      var b = e.target.closest('.l2b-igv-dock-toggle');
+      if (b) b.textContent = (closed ? '▴' : '▾') + ' Results';
+      return;
+    }
+    // clicking the stage dismisses the nav overlay, like tapping off a sheet
+    if (document.body.classList.contains('l2b-nav-open') && e.target.closest('.l2b-igv-stage')) {
+      document.body.classList.remove('l2b-nav-open');
+    }
+  });
+  // These classes live on <body> so the drawer and the nav overlay can be styled
+  // without reaching into the panel, which means they outlive the panel unless
+  // something clears them: leave the tool with the drawer open and it is still
+  // open when you come back, having never been visible in between.
+  var toolWatch = new MutationObserver(function(){
+    if (document.body.getAttribute('data-tool') !== 'cryptic') {
+      document.body.classList.remove('l2b-igv-drawer-open', 'l2b-nav-open');
+    }
+  });
+  if (document.body) toolWatch.observe(document.body, { attributes: true, attributeFilter: ['data-tool'] });
+
+  document.addEventListener('keydown', function(e){
+    if (e.key !== 'Escape') return;
+    if (document.body.classList.contains('l2b-igv-drawer-open')) {
+      document.body.classList.remove('l2b-igv-drawer-open');
+    } else if (document.body.classList.contains('l2b-nav-open')) {
+      document.body.classList.remove('l2b-nav-open');
+    }
+  });
+  // picking a tool from the overlay nav should close it
+  document.addEventListener('click', function(e){
+    if (e.target.closest && e.target.closest('.l2b-col-nav .btn')) {
+      document.body.classList.remove('l2b-nav-open');
+    }
+  });
+
+  // ---- the figure/results splitter (IGV's track-panel divider) ----
+  // Sets one CSS variable; the grid does the rest. Persisted in localStorage
+  // like the theme and the old figure height, so the balance survives a reload.
+  function loadDockH(){
+    try { var v = localStorage.getItem('l2b-dock-h'); return v || '32vh'; }
+    catch (e) { return '32vh'; }
+  }
+  function applyDockH(){ document.documentElement.style.setProperty('--l2b-dock-h', loadDockH()); }
+  applyDockH();
+  document.addEventListener('mousedown', function(e){
+    var sp = e.target.closest ? e.target.closest('.l2b-igv-splitter') : null;
+    if (!sp || e.button !== 0) return;
+    e.preventDefault();
+    var work = sp.closest('.l2b-igv-work');
+    var dock = work && work.querySelector('.l2b-igv-dock');
+    if (!dock) return;
+    document.body.classList.remove('l2b-igv-dock-closed');
+    var startY = e.pageY, startH = dock.getBoundingClientRect().height;
+    var maxH = work.getBoundingClientRect().height - 200;   // always leave the figure room
+    document.body.classList.add('l2b-row-resizing');
+    function onMove(e2){
+      var h = Math.max(60, Math.min(maxH, startH - (e2.pageY - startY)));
+      document.documentElement.style.setProperty('--l2b-dock-h', h + 'px');
+    }
+    function onUp(){
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('l2b-row-resizing');
+      try { localStorage.setItem('l2b-dock-h',
+        getComputedStyle(document.documentElement).getPropertyValue('--l2b-dock-h').trim()); } catch (e3) {}
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  // double-click the splitter to give the figure everything
+  document.addEventListener('dblclick', function(e){
+    if (!e.target.closest || !e.target.closest('.l2b-igv-splitter')) return;
+    e.preventDefault();
+    document.body.classList.toggle('l2b-igv-dock-closed');
+    var b = document.querySelector('.l2b-igv-dock-toggle');
+    if (b) b.textContent = (document.body.classList.contains('l2b-igv-dock-closed') ? '▴' : '▾') + ' Results';
   });
 
   // sync the fullscreen button's label + a body class for CSS (exiting via
@@ -783,10 +1509,18 @@ SASHIMI_JS <- "
     var minReads = Number(slider.value);
     var novelOnly = document.querySelector('.sashimi-filter-novel');
     var onlyNovel = !!(novelOnly && novelOnly.checked);
+    var shown = {};
     document.querySelectorAll('.sashimi-junction').forEach(function(g){
       var show = Number(g.dataset.reads) >= minReads && (!onlyNovel || g.dataset.novel === 'true');
       g.style.opacity = show ? '' : '0.08';
       g.style.pointerEvents = show ? '' : 'none';
+      shown[g.dataset.jkey] = show;
+    });
+    // the arc and its count label are in different layers now (genomic vs
+    // pixel), so filtering has to dim both or a hidden junction keeps a
+    // floating number over the track
+    document.querySelectorAll('.sashimi-jlabel').forEach(function(t){
+      t.style.opacity = shown[t.dataset.jkey] === false ? '0.08' : '';
     });
     var out = document.getElementById('sashimi_filter_val');
     if (out && out.textContent !== slider.value) out.textContent = slider.value;
@@ -813,15 +1547,20 @@ SASHIMI_JS <- "
     catch (e) { return 560; }
   }
   var sashimiHeight = loadSashimiHeight();
+  // In the full-app takeover the figure is sized by the stage grid, not by a
+  // stored pixel height -- setting one here would override flex:1 and reintroduce
+  // the fixed 560px box the takeover exists to get rid of.
+  function inStage(box){ return !!(box && box.closest('.l2b-igv-figwrap')); }
   function applySashimiHeight(){
     var box = document.querySelector('.l2b-sashimi');
-    if (box && !box.classList.contains('l2b-sashimi-expanded')) box.style.height = sashimiHeight + 'px';
+    if (!box || inStage(box)) return;
+    if (!box.classList.contains('l2b-sashimi-expanded')) box.style.height = sashimiHeight + 'px';
   }
   document.addEventListener('mousedown', function(e){
     var handle = e.target.closest ? e.target.closest('.l2b-sashimi-resize-handle') : null;
     if (!handle || e.button !== 0) return;
     var box = document.querySelector('.l2b-sashimi');
-    if (!box) return;
+    if (!box || inStage(box)) return;
     e.preventDefault();
     var startY = e.pageY, startH = box.getBoundingClientRect().height;
     document.body.classList.add('l2b-resizing');
@@ -858,13 +1597,18 @@ SASHIMI_JS <- "
   var mo = new MutationObserver(function(muts){
     for (var i = 0; i < muts.length; i++) {
       if (muts[i].addedNodes && muts[i].addedNodes.length) {
+        initView(figSvg()); syncTopbarH();
         restoreFilterControls(); applyFilter(); applySashimiHeight(); applyPreserveAspectRatio();
         break;
       }
     }
   });
-  function startObserving(){ mo.observe(document.body, { childList: true, subtree: true }); }
+  function startObserving(){
+    mo.observe(document.body, { childList: true, subtree: true });
+    initView(figSvg());
+  }
   if (document.body) startObserving(); else document.addEventListener('DOMContentLoaded', startObserving);
+  window.addEventListener('load', function(){ initView(figSvg()); });
 })();
 </script>
 "

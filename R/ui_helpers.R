@@ -385,15 +385,151 @@ L2B_CSS <- "
   .l2b-shell { display:grid; grid-template-columns:210px minmax(0,1fr) 300px; gap:20px;
     align-items:start; padding:0 2px 44px; }
   .l2b-col-nav, .l2b-col-main, .l2b-col-aside { min-width:0; }
-  /* full-width tools (e.g. the Cryptic Splicing Engine) drop the right rail so wide
-     figures get the room they need */
-  body[data-tool='cryptic'] .l2b-shell, body[data-tool='home'] .l2b-shell { grid-template-columns:210px minmax(0,1fr); }
+  /* full-width tools drop the right rail so wide figures get the room they need */
+  body[data-tool='home'] .l2b-shell { grid-template-columns:210px minmax(0,1fr); }
   body[data-tool='cryptic'] .l2b-col-aside, body[data-tool='home'] .l2b-col-aside { display:none; }
   @media (max-width:1180px) {
-    .l2b-shell, body[data-tool='cryptic'] .l2b-shell, body[data-tool='home'] .l2b-shell { grid-template-columns:1fr; }
+    .l2b-shell, body[data-tool='home'] .l2b-shell { grid-template-columns:1fr; }
     .l2b-col-aside { display:none; }
     .l2b-nav { position:static; }
   }
+
+  /* ================= FULL-APP TAKEOVER (Cryptic Splicing Engine) =================
+     Every other tool is a form that produces an answer, and the 3-column shell is
+     right for those. This one is an instrument you read, and an instrument gets
+     the whole window. Scoped entirely to body[data-tool='cryptic'] -- the
+     mechanism documented at the top of this section -- so nothing here can leak
+     into the other 20 tools.
+
+     The shell stops scrolling and becomes exactly one viewport tall; the stage
+     inside it is a grid that hands the figure every pixel the toolbar and the
+     results dock don't claim. The nav is hidden but NOT removed: the toolbar's
+     hamburger slides it back over the top. A full-screen tool with no way out is
+     a trap, not a takeover. */
+  body[data-tool='cryptic'] .l2b-shell {
+    grid-template-columns:minmax(0,1fr); gap:0; padding:0;
+    height:calc(100vh - var(--l2b-topbar-h, 78px)); overflow:hidden; }
+  body[data-tool='cryptic'] .l2b-col-nav {
+    position:fixed; top:var(--l2b-topbar-h, 78px); left:0; bottom:0; width:230px; z-index:60;
+    padding:14px 12px; overflow-y:auto; background:var(--l2b-surface);
+    border-right:1px solid var(--l2b-border);
+    transform:translateX(-102%); transition:transform .18s ease; }
+  body[data-tool='cryptic'].l2b-nav-open .l2b-col-nav { transform:none; }
+  /* The height chain has to be unbroken all the way down or height:100% silently
+     falls back to content height. Shiny wraps tabsetPanel in a .tabbable div,
+     which is the link that is easy to miss -- without it .l2b-igv measured 1323px
+     inside a 925px column and the drawer stopped halfway down the screen. */
+  body[data-tool='cryptic'] .l2b-col-main { height:100%; min-height:0; }
+  /* Child combinators all the way down, deliberately. A descendant selector here
+     (.tab-content, .tab-pane.active) also matches the NESTED tabsets inside other
+     panels -- Primer & Schematic and Methods & Ordering both have one, and the
+     Cryptic panel has its own results tabset -- handing height:100% to elements
+     that must size to their content. It has no visible effect while those
+     ancestors are hidden, which is exactly what makes it the kind of bug that
+     surfaces months later. Only the outer tab chain should stretch. */
+  body[data-tool='cryptic'] .l2b-col-main > .tabbable,
+  body[data-tool='cryptic'] .l2b-col-main > .tabbable > .tab-content,
+  body[data-tool='cryptic'] .l2b-col-main > .tabbable > .tab-content > .tab-pane.active {
+    height:100%; min-height:0; }
+
+  .l2b-igv { height:100%; display:grid; grid-template-rows:auto minmax(0,1fr); position:relative; }
+
+  /* toolbar: the only controls you touch while looking at data */
+  .l2b-igv-bar { display:flex; align-items:center; gap:10px; padding:10px 16px;
+    border-bottom:1px solid var(--l2b-border); position:relative; z-index:40; flex-wrap:nowrap;
+    background:var(--l2b-glass); backdrop-filter:blur(18px) saturate(150%);
+    -webkit-backdrop-filter:blur(18px) saturate(150%);
+    box-shadow:0 1px 0 var(--l2b-glass-highlight) inset; }
+  .l2b-igv-name { font-weight:700; font-size:14px; letter-spacing:-.01em; white-space:nowrap;
+    padding-right:6px; border-right:1px solid var(--l2b-border); margin-right:2px; }
+  .l2b-igv-navbtn { border:1px solid var(--l2b-border); background:var(--l2b-surface-2);
+    color:var(--l2b-text-muted); border-radius:9px; width:32px; height:32px; font-size:14px;
+    cursor:pointer; flex:none; }
+  .l2b-igv-navbtn:hover { background:var(--l2b-surface-hover); color:var(--l2b-text); }
+  .l2b-igv-locus { display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0; }
+  /* Shiny wraps every input in a .form-group with a bottom margin meant for a
+     stacked form; in a toolbar that margin is what makes everything look
+     misaligned by 15px. */
+  .l2b-igv-locus .form-group, .l2b-igv-bar .form-group { margin:0; }
+  .l2b-igv-locus .shiny-input-container { width:auto !important; margin:0; }
+  .l2b-igv-locus input[type='text'] { min-width:230px; height:34px; font-size:13.5px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .l2b-igv-locus select { height:34px; font-size:13px; }
+  .l2b-igv-bar .btn-run.l2b-igv-run { width:auto; margin:0; padding:0 18px; height:34px;
+    font-size:13.5px; flex:none; }
+  .l2b-igv-ghost { border:1px solid var(--l2b-border); background:var(--l2b-surface-2);
+    color:var(--l2b-text-muted); border-radius:9px; height:34px; padding:0 13px; font-size:13px;
+    cursor:pointer; white-space:nowrap; flex:none; }
+  .l2b-igv-ghost:hover { background:var(--l2b-surface-hover); color:var(--l2b-text); }
+
+  /* settings drawer: set once a session, so it slides away rather than sitting
+     next to the figure forever */
+  .l2b-igv-drawer { position:absolute; top:0; right:0; bottom:0; width:min(430px, 92vw); z-index:70;
+    background:var(--l2b-surface); border-left:1px solid var(--l2b-border);
+    box-shadow:-24px 0 60px rgba(0,0,0,.28); transform:translateX(101%);
+    transition:transform .2s ease; overflow-y:auto; }
+  body.l2b-igv-drawer-open .l2b-igv-drawer { transform:none; }
+  .l2b-igv-drawer-inner { padding:16px 16px 40px; }
+  .l2b-igv-drawer-head { display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:12px; font-weight:700; font-size:14px; }
+  .l2b-igv-drawer .l2b-card { margin-bottom:12px; }
+  .l2b-igv-scrim { position:absolute; inset:0; z-index:65; background:rgba(4,6,14,.34);
+    opacity:0; pointer-events:none; transition:opacity .2s ease; }
+  body.l2b-igv-drawer-open .l2b-igv-scrim { opacity:1; pointer-events:auto; }
+
+  /* the stage: figure takes everything the dock doesn't */
+  .l2b-igv-stage { min-height:0; overflow:hidden; }
+  .l2b-igv-stage > .shiny-html-output { height:100%; }
+  /* strip / figure / splitter / dock. The figure takes what is left after the
+     dock, and the dock's height is a variable the splitter drags -- IGV's
+     track-panel divider. minmax(140px,1fr) on the figure means the drag can
+     never squeeze the instrument down to nothing. */
+  .l2b-igv-work { height:100%; display:grid; min-height:0;
+    grid-template-rows:auto minmax(140px,1fr) 11px var(--l2b-dock-h, 32vh); }
+  body.l2b-igv-dock-closed .l2b-igv-work { grid-template-rows:auto minmax(140px,1fr) 11px auto; }
+  .l2b-igv-splitter { cursor:row-resize; background:var(--l2b-surface-2);
+    border-top:1px solid var(--l2b-border); border-bottom:1px solid var(--l2b-border);
+    display:flex; align-items:center; justify-content:center; user-select:none; }
+  .l2b-igv-splitter::before { content:''; width:44px; height:3px; border-radius:2px;
+    background:var(--l2b-border-strong); transition:background .15s, width .15s; }
+  .l2b-igv-splitter:hover::before { background:var(--l2b-accent); width:64px; }
+  body.l2b-row-resizing, body.l2b-row-resizing * { cursor:row-resize !important; user-select:none !important; }
+  .l2b-igv-figwrap { min-height:0; display:flex; flex-direction:column; padding:12px 16px 12px;
+    background:
+      radial-gradient(1200px 380px at 18% -10%, rgba(124,108,240,.07), transparent 65%),
+      radial-gradient(900px 320px at 88% 110%, rgba(242,163,65,.05), transparent 60%); }
+  body[data-tool='cryptic'] .l2b-igv-figwrap .l2b-sashimi {
+    height:auto !important; flex:1 1 auto; min-height:0; border-radius:14px;
+    border:1px solid var(--l2b-glass-border);
+    box-shadow:0 18px 50px rgba(0,0,0,.30), inset 0 1px 0 var(--l2b-glass-highlight);
+    padding:0; overflow:hidden; }
+  body[data-tool='cryptic'] .l2b-igv-figwrap .l2b-sashimi svg { min-width:0; }
+  .l2b-igv-strip { display:flex; align-items:center; gap:14px; padding:8px 16px; flex-wrap:wrap;
+    border-bottom:1px solid var(--l2b-border); font-size:12.5px;
+    background:linear-gradient(to bottom, var(--l2b-surface-2), var(--l2b-surface));
+    box-shadow:0 1px 0 var(--l2b-glass-highlight) inset; }
+  /* The locus readout is the one number you look at constantly, so it reads as a
+     field rather than as body text -- the address bar of a genome browser. */
+  #sashimi_locus_readout { padding:3px 10px; border-radius:7px; border:1px solid var(--l2b-border);
+    background:var(--l2b-surface-2); letter-spacing:-.01em; }
+  .l2b-igv-strip input[type='range'] { height:4px; border-radius:3px; }
+
+  /* results dock: present, collapsible, and never competing with the figure */
+  /* The figure is the point, so the dock is capped and scrolls internally rather
+     than growing to fit its tables. Collapsing it (the Results button) hands the
+     whole stage to the figure. */
+  .l2b-igv-dock { background:var(--l2b-surface); min-height:0; overflow-y:auto; padding:0 14px 14px; }
+  body.l2b-igv-dock-closed .l2b-igv-dock { overflow:visible; }
+  body.l2b-igv-dock-closed .l2b-igv-dock-body { display:none; }
+  .l2b-igv-dock-head { display:flex; align-items:center; gap:10px; padding:8px 0 6px;
+    position:sticky; top:0; background:var(--l2b-surface); z-index:5; flex-wrap:nowrap; }
+  .l2b-igv-dock-title { font-size:11.5px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--l2b-text-muted); font-weight:700; white-space:nowrap; }
+  /* .btn-dl is full-width by default, which is right in a stacked card and very
+     wrong in a toolbar -- three of them became green banners across the footer. */
+  .l2b-igv-dock-head .btn-dl, .l2b-igv-dock-head .shiny-download-link {
+    width:auto !important; flex:none; margin:0; padding:0 14px; height:30px;
+    display:inline-flex; align-items:center; font-size:12.5px; }
 
   /* ================= INLINE SASHIMI FIGURE =================
      A resizable viewport (drag the grip below it, IGV-style track-height
@@ -765,6 +901,7 @@ l2b_topbar <- function() {
         span(class = "l2b-search-icon", "\U0001f50d"),
         tags$input(type = "text", id = "l2b-search", placeholder = "Search tools..."),
         span(class = "l2b-search-kbd", "⌘K")),
+    uiOutput("l2b_update_pill", class = "l2b-update-slot"),
     div(class = "l2b-theme-toggle",
         tags$button(`data-l2b-theme` = "light", title = "Light mode", "☀️"),
         tags$button(`data-l2b-theme` = "dark", title = "Dark mode", "\U0001f319"))

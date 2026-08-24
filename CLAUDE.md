@@ -61,13 +61,61 @@ a checkout and silently fails in the installed app.
 
 ## Architecture
 
-### App shape: a tool registry, not a set of routes
-`app.R` is one Shiny app where every tool follows the same triplet:
-1. A `TOOLS` list entry (`id`, `label`, `icon`, `group`) plus a `TOOL_ABOUT`/`TOOL_RELATED` entry — this drives the left nav, the right-rail "About this tool" card, and cross-tool "Quick actions" links.
-2. A `panel_<id>()` function building that tool's UI, registered as a `tabPanel` inside one hidden `tabsetPanel(id = "tool_tabs")`. Panels are built once and never destroyed/rebuilt on tab switch — this is deliberate (rebuilding panels was previously corrupting DT's internal JS state).
-3. A block in `server()` following the same shape every time: `reactiveVal` for result + error, an `observeEvent` on a "go" button wrapping the actual computation in `tryCatch`, a `renderUI` that branches on error/empty/success, and a `status_row()` entry in the aside dispatcher (`output$aside_out`).
+### App shape: a tool registry, and one file per tool
+`app.R` is a ~200-line shell: sources, the page shell, two loops over `TOOLS`,
+and the right-rail dispatcher. Every tool is three things:
 
-When adding a new tool, copy this triplet from an existing simple tool (e.g. the A280 or Dilution calculator) rather than inventing new plumbing.
+1. A `TOOLS` entry in **`R/registry.R`** (`id`, `label`, `icon`, `group`) plus a
+   `TOOL_ABOUT`/`TOOL_RELATED` entry — this drives the left nav, the right rail's
+   "About this tool" card, the cross-tool "Quick actions" links, **and which
+   `R/panels/<id>.R` files get sourced**. A tool with no file stops the app at
+   startup, which is the behaviour you want: a tool that silently fails to load
+   is much worse than one that refuses to start.
+2. `panel_<id>()` in **`R/panels/<id>.R`**, registered as a `tabPanel` inside one
+   hidden `tabsetPanel(id = "tool_tabs")`. Panels are built once and never
+   destroyed/rebuilt on tab switch — deliberate: rebuilding them corrupts DT's
+   internal JS state ("Invalid JSON response"). Do not make the panel list reactive.
+3. `server_<id>(input, output, session, ctx)` in the same file, following the same
+   shape every time: `reactiveVal` for result + error, an `observeEvent` on a "go"
+   button wrapping the computation in `tryCatch`, a `renderUI` branching on
+   error/empty/success, and a `ctx$publish()` call supplying the right-rail status.
+
+These are deliberately **not Shiny modules**. Modules would namespace every input
+id, which buys isolation this app doesn't need (one user, one session, ids already
+prefixed by tool) at the cost of rewriting every id and breaking the client-side JS
+that addresses them by name.
+
+When adding a tool, copy this triplet from a simple one (A280, Dilution).
+
+### `ctx` — the only channel between tools (`R/ctx.R`)
+One environment per session, passed to every `server_<id>()`. It holds the
+genuinely shared session state (`dark_mode`), the named handoff channels
+(`shared_selected_tx`, `pcr_provenance`, `qpcr_provenance`, `design_handoff`), and
+two registries: `ctx$grids` for editable DT grids another tool writes into, and
+`ctx$state` where each tool publishes what others may read.
+
+**Read cross-tool state through a deferred accessor, never an alias.**
+
+```r
+cryptic_res <- function() ctx$state$cryptic$res()      # correct
+cryptic_res <- ctx$state$cryptic$res                   # WRONG: NULL at build time
+```
+
+`app.R` constructs the tool servers in `TOOLS` order, so `server_report()` runs
+before `server_cryptic()` even though it reads the engine's result. That is fine
+only because every cross-tool read happens inside a reactive/observer body,
+deferred to flush time when all 21 exist.
+
+**The characteristic bug of this layout** is a block that references a reactive
+which now lives in another file: it parses, then throws at runtime, so the button
+silently does nothing. That shipped once ("View exons for selected transcript").
+`scripts/check_unresolved.R` sources the app and runs `codetools::findGlobals()`
+over every `server_<id>()` to find free variables nothing defines — run it after
+moving code between panel files. (It needs `ls(all.names = TRUE)`, or every
+dot-prefixed helper reports as missing.)
+
+Nothing in `ctx` may be logged: it holds resolved BAM paths, the selected
+transcript and the design target, and `usage.R` records no paths or loci.
 
 ### Deterministic-first philosophy
 Almost everything computes with plain R arithmetic or calls a real external tool/API — the header comments in `primer_design.R` and `design_splicing_primers.R` say this explicitly. Two established patterns for reaching outside R:
@@ -154,5 +202,118 @@ Given a locus and a control + knockdown RNA-seq BAM pair (uploaded from the brow
 - `sashimi_plot.R`: the figure itself (see above).
 - `export_pdf.R`: headless-Chrome print-to-PDF for the figure.
 - `cryptic_interpret.R`: turns a result into a plain-language interpretation via a **local** Ollama model. Deliberately constrained: the computed result is the only ground truth; PubMed abstracts (fetched only for a real gene symbol, never a raw locus) are injected as explicitly-attributed background context the model is told never to assert as fact about the user's sample. `summarize_cryptic_findings()` is the deterministic fact block the prompt is built around — if you change what the detector computes, update this function so the interpreter stays grounded in it.
+
+### The tile layer (`R/cryptic_tile.R`) — why the viewer navigates in real time
+`cached_track_data()` keys on (files, chrom, **start, end**), so before tiling every
+pan and zoom was a total cache miss: a fresh indexed read per replicate plus two
+UCSC fetches. A tile inverts the key — read a span *wider* than the view once, keep
+what is window-independent, and derive every sub-window from it. The expensive/cheap
+split is preserved and moved: it was `f(files, locus)` vs `f(thresholds)`, it is now
+**`f(files, buffer)` vs `f(window, thresholds)`**.
+
+**Every slice is exact, never interpolated**, and that is the rule to protect — a
+genome browser that silently smooths data is worse than a slow one. Coverage is
+re-binned from the base-resolution `Rle` (so zooming genuinely adds resolution, and
+the client must never interpolate instead); junctions re-apply `junction_table()`'s
+own containment rule; `n_reads` is counted from sorted read-interval vectors by
+binary search, matching what `readGAlignments()` returns for that window.
+
+`run_cryptic_detection()` is the **identity case** of the tiled path (buffer = locus),
+so the code the viewer navigates with is the code every run already exercises and the
+two cannot drift. Verified field-by-field identical to the pre-tiling implementation.
+
+`tile_render_bins()` scales bins with the buffer so the *visible* window keeps the
+resolution a direct render would have given it. Without it a buffered figure is 3x
+coarser than before tiling — a silent quality regression, and the client would
+correctly keep asking for a better tile forever.
+
+### The sashimi viewer's two coordinate spaces (`sashimi_plot.R`)
+The figure is one `<svg>` holding a pixel underlay, a **geometry group** carrying a
+`translate/scale` transform (genomic bp on x, pixels on y), and **two label groups** —
+one bp-anchored, one pinned to the gutter. Panning is one transform write; a pure pan
+also moves the bp-anchored labels as a group (the fast path) rather than repositioning
+each one.
+
+Rules that are load-bearing:
+- **No text inside the geometry group, ever.** It would scale with the viewBox.
+- Everything stroked there carries `vector-effect="non-scaling-stroke"`. That also
+  gives thin features their floor — a 3 bp exon is drawn at its true width rather
+  than padded to a minimum genomic width that would overstate it at exactly the zoom
+  where someone is measuring.
+- Geometry x is bp **relative to `data-origin`**, not absolute: absolute coordinates
+  reach 2.5e8 on chr1 and invite float jitter at deep zoom. Absolute bp stays on every
+  element as `data-start`/`data-end`, because tooltips and the primer handoff read it.
+- `clip-path` goes on an **outer, untransformed** `<g>`. On the transformed group it
+  resolves in post-transform space and scales the clip with `sx`.
+- The tile trigger measures **real screen pixels**, not viewBox units: the viewBox
+  width scales with junction count, so a user-unit test can never be satisfied on a
+  dense locus and loops forever ("loading finer detail" that never clears).
+- `.nice_ticks()`/`.fmt_bp()` are duplicated in `SASHIMI_JS` of necessity — the static
+  export has no JS, the live view has no server. Change one, change the other.
+
+The engine takes over the whole window (toolbar / settings drawer / stage / results
+dock), all scoped to `body[data-tool='cryptic']`. When adding rules there, use child
+combinators: a descendant selector like `.tab-content` also matches the nested tabsets
+inside other panels.
+
+### Dev sync and the update notice (`bootstrap.sh`, `R/dev_sync.R`)
+A build made from a checkout (`--no-dmg`) records its path in
+`Contents/Resources/DEV_SOURCE`; the launcher exports that checkout's **committed
+HEAD** into `l2b_data_dir()/src` and runs from there, so a `git commit` updates the
+installed app with no rebuild. HEAD rather than the working tree, so launching
+mid-edit cannot run half-saved code. Never into the bundle — that invalidates its
+signature. Absent from a `.dmg`, so it does nothing on anyone else's Mac, and
+`update_check.R` remains notify-only.
+
+**Every git call is time-bounded, and that is not padding.** macOS TCC-protects
+`~/Desktop`, `~/Documents` and `~/Downloads`: a GUI-launched app reading a checkout in
+one of them *blocks* for consent a background child can never be granted. `git
+rev-parse` never returned and the launcher hung with no server and a blank window. A
+hung dependency must degrade to "skip it".
+
+`R/dev_sync.R` notices commits made while the app is running and shows a topbar pill.
+It only notifies; applying means quitting and reopening.
+
+### The protein layer (`protein_seq.R`, `protein_annot.R`, `protein_consequence.R`)
+Answers the question the RNA-side tools stop short of: once a cryptic exon is
+included, is there still a protein, and what is missing from it? Three files, split
+on one line that matters.
+
+**`protein_seq.R` is pure and network-free, and must stay that way** — it is the
+file every other protein tool will source. Standard genetic code (NCBI table 1
+only; mitochondrial/alternative codes are *not* handled), `translate_dna()`,
+six-frame `find_orfs()`, `splice_transcript()`, `predict_nmd()` (the 55-nt rule),
+`protein_diff()`, `domains_affected()`. The codon table is generated from the
+published NCBI amino-acid string rather than typed out as 64 entries — one
+transcription of one constant instead of 64 chances to typo.
+
+**Do not loosen `.clean_seq()` in `protein_params.R`.** It hard-errors on any
+letter outside the 20 standard residues, and `a280`/`pp` depend on that: it is
+what stops someone quantifying a typo. A *translation* legitimately produces `*`
+and `X`, so `protein_seq.R` carries its own `.clean_seq_permissive()`, and
+`strip_stops()` is the bridge to `protein_parameters()`.
+
+**`protein_annot.R` needs no JSON parser, deliberately.** UniProt serves
+`format=tsv` and `format=fasta`, so parsing is `strsplit` on tabs — the same
+no-JSON-dependency rule `fetch_genomic()` follows, but without even the regex.
+Domain coordinates come from the `ft_domain` feature string. Disk cache under
+`l2b_data_dir()/protein-cache`, successes only, TTL constant, exactly like
+`update_check.R`.
+
+**Never construct an AlphaFold model URL.** The documented `..._v4.pdb` form
+already 404s (the database is on v6 and will move again) — `alphafold_model()`
+reads `pdbUrl` out of the API reply. Note also that `url()`/`readLines()` reports
+HTTP status in a *warning* and then fails with a generic "cannot open the
+connection" error, so distinguishing "no model for this protein" from "database
+unreachable" means catching the 404 on the warning side.
+
+**`protein_consequence.R` is the orchestrator** and the only one of the three that
+touches the network for its own logic: locus → UCSC transcripts → one genomic
+fetch for the whole span (sliced locally, so a 44-exon gene is one request, not
+44) → splice with and without the cryptic exon → translate from the annotated
+start codon → NMD → UniProt domains. UniProt failure is soft: the analysis is
+complete and correct without it. Verified end to end against UniProt for STMN2,
+TP53, UNC13A, SOD1 and BRCA1 — both strands, 5 to 44 exons, translations identical
+to the reference.
 
 Known non-bug to be aware of when testing: `GenomicAlignments::coverage()`'s `width=` argument, if named, must name every seqlevel in the alignment object (every contig in the BAM header), not just the chromosome of interest — `coverage_bins()` works around this by computing unwindowed coverage and padding/cropping the one chromosome's `Rle` by hand.

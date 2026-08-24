@@ -264,6 +264,113 @@ else
   log "no Homebrew -- skipping primer3 (primer design will prompt for it)"
 fi
 
+# ----------------------------------------------------------------- dev sync
+# Run the app from the git checkout this bundle was built from, so a commit is
+# all it takes to update the installed app -- no rebuild, no download.
+#
+# This is a LOCAL DEVELOPER path, not an update channel, and the distinction is
+# the whole design. R/update_check.R still only ever notifies: nothing anywhere
+# fetches code over the network and runs it. DEV_SOURCE is written only when
+# building from a checkout (build.sh), names an absolute path on the machine
+# that built it, and is simply absent from a released .dmg -- so on anyone
+# else's Mac this block does nothing at all.
+#
+# Three deliberate choices:
+#   * the COMMITTED HEAD, not the working tree. `git archive` exports the last
+#     commit, so launching in the middle of an edit can never run half-saved
+#     code -- the thing that makes "it updates itself" frightening in an
+#     analysis tool.
+#   * into Application Support, never into the bundle. Mutating a signed bundle
+#     invalidates its signature; the app's writable state already lives there
+#     (see R/paths.R).
+#   * every failure falls back to the bundled copy, and none of them may stop
+#     the app from launching.
+#
+# EVERY GIT CALL IS TIME-BOUNDED, and that is not defensive padding -- it is the
+# bug this was written around. macOS protects ~/Desktop, ~/Documents and
+# ~/Downloads (TCC): a GUI-launched app reading a checkout in one of them BLOCKS
+# until consent is granted, and consent cannot be granted for a child process
+# nobody can see. `git rev-parse` simply never returned, so the launcher hung
+# after the primer3 step and no server was ever started -- an app that opened to
+# a blank window. A hung dependency must degrade to "skip it", never to "hang
+# the launch".
+#
+# LIT2BENCH_NO_DEV_SYNC=1 turns it off and pins the app to its bundled source.
+
+# bounded <seconds> <outfile> <cmd...> -- macOS has no timeout(1), so run the
+# command in the background and poll, killing it if it overruns.
+bounded() {
+  b_secs="$1"; b_out="$2"; shift 2
+  : > "$b_out"
+  ( "$@" > "$b_out" 2>/dev/null ) &
+  b_pid=$!
+  b_n=0
+  while kill -0 "$b_pid" 2>/dev/null; do
+    b_n=$((b_n + 1))
+    if [ "$b_n" -ge $((b_secs * 10)) ]; then
+      kill -9 "$b_pid" 2>/dev/null
+      wait "$b_pid" 2>/dev/null
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "$b_pid" 2>/dev/null
+}
+
+DEV_SOURCE_FILE="$RESOURCES_DIR/DEV_SOURCE"
+if [ -z "${LIT2BENCH_NO_DEV_SYNC:-}" ] && [ -f "$DEV_SOURCE_FILE" ]; then
+  DEV_SRC="$(cat "$DEV_SOURCE_FILE" 2>/dev/null)"
+  SRC_DIR="$SUPPORT/src"
+  TMP_OUT="$SUPPORT/state/devsync.out"
+  if [ -n "$DEV_SRC" ] && [ -d "$DEV_SRC/.git" ] && command -v git >/dev/null 2>&1; then
+    if bounded 8 "$TMP_OUT" git -C "$DEV_SRC" rev-parse --short HEAD; then
+      dev_head="$(tr -d '\n' < "$TMP_OUT")"
+      bounded 5 "$TMP_OUT" git -C "$DEV_SRC" rev-parse --abbrev-ref HEAD || true
+      dev_branch="$(tr -d '\n' < "$TMP_OUT")"
+      if [ -z "$dev_head" ]; then
+        log "dev sync: could not read HEAD -- using bundled source"
+      elif [ "$(cat "$SRC_DIR/.head" 2>/dev/null)" = "$dev_head" ] && [ -f "$SRC_DIR/app.R" ]; then
+        log "dev sync: already at $dev_head (${dev_branch:-?})"
+        APP_DIR="$SRC_DIR"
+        # The app watches this to notice commits made while it is running, and
+        # says so. It still only NOTIFIES -- applying an update means quitting
+        # and reopening, which is when the sync above runs.
+        export LIT2BENCH_DEV_SOURCE="$DEV_SRC"
+      else
+        step 3 "Updating Lit2Bench" "Syncing ${dev_branch:-HEAD} @ ${dev_head}…"
+        tarball="$SUPPORT/state/devsync.tar"
+        tmp="$SUPPORT/src.new"
+        rm -rf "$tmp"; mkdir -p "$tmp"
+        if bounded 90 "$tarball" git -C "$DEV_SRC" archive HEAD \
+           && [ -s "$tarball" ] && tar -x -C "$tmp" -f "$tarball" 2>/dev/null && [ -f "$tmp/app.R" ]; then
+          # keep the marketing version, but report the commit actually running
+          base_ver="$(awk '{print $1}' "$RESOURCES_DIR/app/VERSION" 2>/dev/null)"
+          printf '%s (%s)\n' "${base_ver:-0.0.0}" "$dev_head" > "$tmp/VERSION"
+          printf '%s' "$dev_head" > "$tmp/.head"
+          rm -rf "$SRC_DIR"
+          if mv "$tmp" "$SRC_DIR" 2>/dev/null; then
+            APP_DIR="$SRC_DIR"
+            export LIT2BENCH_DEV_SOURCE="$DEV_SRC"
+            log "dev sync: updated to $dev_head (${dev_branch:-?})"
+          else
+            log "dev sync: could not install export -- using bundled source"
+          fi
+        else
+          rm -rf "$tmp"
+          log "dev sync: export failed or timed out -- using bundled source"
+        fi
+        rm -f "$tarball"
+      fi
+    else
+      log "dev sync: git did not respond within 8s -- using bundled source."
+      log "  (macOS blocks GUI apps from ~/Downloads, ~/Documents and ~/Desktop"
+      log "   until you grant access; a checkout outside those needs no consent.)"
+    fi
+  else
+    log "dev sync: no usable checkout at '${DEV_SRC:-}' -- using bundled source"
+  fi
+fi
+
 # -------------------------------------------------------------------- launch
 step 4 "Starting Lit2Bench" "Loading the toolkit…"
 
