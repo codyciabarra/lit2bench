@@ -203,11 +203,19 @@ run_cryptic_detection_tiled <- function(bundle, locus, thresholds, n_bins = 800)
 
   known_junc <- known_junctions_from_transcripts(transcripts)
   known_exons <- known_exons_from_transcripts(transcripts)
+  # Splice-site strength for the results table. build = FALSE on purpose: this
+  # reads an already-built matrix off disk and otherwise returns NULL. A
+  # detection run must never stall behind a first-time matrix build (which needs
+  # the network), and on an air-gapped box the column simply does not appear
+  # while everything else works exactly as before.
+  pwm <- tryCatch(splice_pwm(bundle$assembly, build = FALSE), error = function(e) NULL)
+
   candidates <- detect_cryptic_candidates(
     control_track$junctions, kd_track$junctions, known_junc,
     min_kd_reads = thresholds$min_kd_reads, max_control_reads = thresholds$max_control_reads,
     exon_len_range = c(thresholds$exon_min, thresholds$exon_max),
-    window_seq = window_seq, window_seq_start = locus$start, known_exons = known_exons)
+    window_seq = window_seq, window_seq_start = locus$start, known_exons = known_exons,
+    splice_pwm = pwm)
   # Differential splicing, like the cryptic calls above, is meaningless without
   # a reference splicing program: with no annotated introns (chrM, single-exon,
   # intergenic) every "junction" is an artifact, so skip it rather than report
