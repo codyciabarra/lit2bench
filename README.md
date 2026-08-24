@@ -56,7 +56,12 @@ the box — no hunting down Bioconductor packages by hand.
   locus and flag cryptic exons, cryptic splice sites, exitrons, and intron
   retention in an IGV-style sashimi plot. Drag to pan, double-click or use the
   zoom buttons to move in and out — reads are tiled, so navigating the locus
-  costs arithmetic rather than re-reading the BAM.
+  costs arithmetic rather than re-reading the BAM. Every novel junction is
+  scored for **splice-site strength** against the annotated sites in the same
+  gene (weak-for-this-gene is what a repressed cryptic site looks like), with an
+  optional SpliceAI second opinion on a single site; any candidate exon can be
+  checked for **TDP-43 evidence** — strand-aware UG richness plus measured
+  ENCODE eCLIP binding.
 - **Protein Consequence** — takes a cryptic exon and works out what it does to
   the protein: splices it into the real annotated transcript, translates from the
   annotated start codon, and reports the frameshift, the premature stop, whether
@@ -100,6 +105,7 @@ separate install.
 | `R/registry.R` | the tool registry — one entry per tool, driving the nav, the tabs and the right rail |
 | `R/panels/<id>.R` | one file per tool: its `panel_<id>()` UI and `server_<id>()` logic |
 | `R/*.R` | the computation behind the tools — BAM I/O, primer design, translation, SVG figures |
+| `R/splice_*.R`, `R/clip_peaks.R` | the splice layer: pure scoring, the matrix builder, the SpliceAI lookup, ENCODE eCLIP peaks |
 | `scripts/` | `check_unresolved.R` (run it after moving code between panel files) and the download-stats snapshot |
 | `installer/` | packages the repo into `Lit2Bench.app` + a `.dmg` — see [installer/README.md](installer/README.md) |
 | `site/` | the product website (static; deployed to GitHub Pages) |
