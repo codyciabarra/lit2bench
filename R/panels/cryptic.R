@@ -53,6 +53,17 @@
 #
 # Every input id is unchanged. The server half of this file does not know or care
 # that the furniture moved.
+# "12th", "1st", "23rd" -- a percentile reads as a rank to a person, and
+# "12 pct" reads as a measurement. Handles the 11/12/13 exception.
+.ordinal <- function(n) {
+  n <- as.integer(round(n))
+  suffix <- ifelse(n %% 100 %in% 11:13, "th",
+             ifelse(n %% 10 == 1, "st",
+             ifelse(n %% 10 == 2, "nd",
+             ifelse(n %% 10 == 3, "rd", "th"))))
+  paste0(n, suffix)
+}
+
 panel_cryptic <- function() {
   div(class = "l2b-igv",
 
@@ -97,7 +108,14 @@ panel_cryptic <- function() {
           fluidRow(column(6, numericInput("cryptic_min_kd_reads", "Min KD reads", value = 3, min = 1)),
                    column(6, numericInput("cryptic_max_ctrl_reads", "Max control reads", value = 1, min = 0))),
           fluidRow(column(6, numericInput("cryptic_exon_min", "Min candidate exon (bp)", value = 20, min = 1)),
-                   column(6, numericInput("cryptic_exon_max", "Max candidate exon (bp)", value = 400, min = 1))))
+                   column(6, numericInput("cryptic_exon_max", "Max candidate exon (bp)", value = 400, min = 1)))),
+        l2b_card(5, "Splice-site strength (optional)",
+          paste("Adds a Novel site / Strength column to the junction table: how strong the junction's new splice site is,",
+                "and where it ranks against the annotated sites in the same gene. Weak-for-this-gene is what a repressed",
+                "cryptic site looks like. Built once per assembly by counting real annotated splice sites, then kept on disk",
+                "and used offline. It does not affect which junctions are detected."),
+          uiOutput("cryptic_pwm_status"),
+          actionButton("cryptic_pwm_build", "Build splice-site matrix", class = "btn-alt"))
       )
     ),
     div(class = "l2b-igv-scrim"),
@@ -117,6 +135,55 @@ server_cryptic <- function(input, output, session, ctx) {
   # per-session (not global) so concurrent sessions can't serve each other's
   # tracks, and everything is released when the session ends
   cryptic_cache <- new_bam_cache()
+
+  # ---- splice-site matrix (optional; feeds the junction table's Strength column)
+  # A reactiveVal rather than reading the disk on every render: the file only
+  # changes when the button below writes it, and the Engine re-renders often.
+  cryptic_pwm_msg <- reactiveVal(NULL)
+  cryptic_pwm_built <- reactiveVal(0)
+  output$cryptic_pwm_status <- renderUI({
+    cryptic_pwm_built()
+    asm <- if (is.null(input$cryptic_assembly)) "hg38" else input$cryptic_assembly
+    msg <- cryptic_pwm_msg()
+    if (!is.null(msg)) return(l2b_warn(msg))
+    if (splice_pwm_ready(asm))
+      div(class = "l2b-aside-note", sprintf("Matrix ready for %s. The junction table shows Novel site and Strength.", asm))
+    else
+      div(class = "l2b-aside-note",
+          sprintf("No matrix for %s yet. One build (about 15 seconds, needs network) and it is reused offline from then on.", asm))
+  })
+  observeEvent(input$cryptic_pwm_build, {
+    asm <- if (is.null(input$cryptic_assembly)) "hg38" else input$cryptic_assembly
+    cryptic_pwm_msg(NULL)
+    # NOT a "run": by_tool_runs ranks tools by detection runs, and counting a
+    # one-off matrix build as one would inflate the Engine exactly the way the
+    # *_design_*_go observers would if they were instrumented.
+    l2b_log("splice_pwm_build", tool = "cryptic")
+    withProgress(message = sprintf("Building the %s splice-site matrix", asm), value = 0, {
+      n <- length(.SPLICE_PWM_WINDOWS) + 1
+      ok <- tryCatch({
+        splice_pwm(asm, build = TRUE, progress = function(m) incProgress(1 / n, detail = m))
+        TRUE
+      }, error = function(e) { cryptic_pwm_msg(conditionMessage(e)); FALSE })
+    })
+    cryptic_pwm_built(cryptic_pwm_built() + 1)
+    # Re-derive the tables so the column appears on the result already on screen,
+    # rather than making the user click Analyze again to see something they just
+    # enabled. This re-runs detection from the loaded tile -- arithmetic over
+    # reads already in memory, no BAM touched -- and only the tables change, so
+    # the figure on screen stays exactly as it is and needs no re-send.
+    if (ok && !is.null(figstate$bundle) && !is.null(figstate$result) && !is.null(figstate$view)) {
+      tryCatch({
+        prev <- figstate$result
+        out <- cryptic_view_results(figstate$bundle, prev$chrom, figstate$label,
+                                    figstate$view$start, figstate$view$end,
+                                    figstate$thresholds,
+                                    orig_start = prev$orig_start, orig_end = prev$orig_end)
+        figstate$result <- out$figure
+        cryptic_res(out$view)
+      }, error = function(e) NULL)
+    }
+  })
   # set once a run succeeds; lets zoom (below) re-run run_cryptic_detection()
   # at a new window without re-resolving or re-materializing the BAMs
   cryptic_bam_info <- reactiveVal(NULL)
@@ -411,7 +478,17 @@ server_cryptic <- function(input, output, session, ctx) {
                               value = isolate(input$cryptic_single_pair_only) %||% FALSE),
                 DTOutput("cryptic_junc_tbl"),
                 p(class = "l2b-card-sub", "Select a junction row above, then jump straight to the Primer Designer — no manual coordinate entry."),
-                actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;")
+                actionButton("cryptic_design_junc_go", "Design primers for selected junction →", class = "btn-alt", style = "width:auto;"),
+                # Second opinion. One site, on a click -- never over the table.
+                # See the rate-limit note at the top of splice_ai.R.
+                div(style = "margin-top:14px; padding-top:14px; border-top:1px solid var(--l2b-border);",
+                  p(class = "l2b-card-sub",
+                    "Lit2Bench scores splice sites locally with its own matrix. For a selected junction you can also ask ",
+                    tags$b("SpliceAI"), " — a deep model that ranks sites better than a position-weight matrix. ",
+                    "This is the one feature that sends a coordinate off your machine, it asks about one site per click, ",
+                    "and nothing else depends on the answer."),
+                  actionButton("cryptic_spliceai_go", "Ask SpliceAI about the selected junction", class = "btn-ghost", style = "width:auto;"),
+                  uiOutput("cryptic_spliceai_out"))
               ),
               tabPanel(tagList("Candidate exons (", textOutput("cryptic_n_ce", inline = TRUE), ")"),
                 br(),
@@ -502,6 +579,18 @@ server_cryptic <- function(input, output, session, ctx) {
                      ifelse(df$exitron, "Exitron", "Cryptic splice site selection")),
       `Exons skipped` = ifelse(is.na(df$exons_skipped), "—", df$exons_skipped),
       Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
+    # Splice-site strength, only when a matrix has been built for this assembly
+    # (Splice Code -> "Build the matrix"). Absent rather than blank-filled: a
+    # column of dashes reads as "measured, nothing there" instead of "not
+    # measured". These describe the junction; they had no say in whether it was
+    # detected -- see the note in detect_cryptic_candidates().
+    if (all(c("novel_end", "novel_score", "novel_pct") %in% names(df))) {
+      out$`Novel site` <- ifelse(is.na(df$novel_end), "—", tools::toTitleCase(df$novel_end))
+      out$Strength <- ifelse(is.na(df$novel_score), "—",
+        ifelse(is.na(df$novel_pct),
+               sprintf("%.1f bits", df$novel_score),
+               sprintf("%.1f bits · %s pct", df$novel_score, .ordinal(df$novel_pct))))
+    }
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)
   output$cryptic_exon_tbl <- renderDT({
@@ -577,6 +666,51 @@ server_cryptic <- function(input, output, session, ctx) {
       withProgress(message = "Thinking locally...", value = 0.5, .run_cryptic_interp(question = q))
       updateTextInput(session, "cryptic_followup", value = "")
     }
+  })
+
+  # ---- SpliceAI second opinion (optional, one site, explicit click) --------
+  cryptic_spliceai <- reactiveVal(NULL)
+  # Clear the moment the view moves: an answer is about ONE site, and leaving it
+  # on screen next to a different window's table would read as a claim about
+  # whatever is now shown -- the same rule the local interpretation follows.
+  observeEvent(cryptic_res(), cryptic_spliceai(NULL))
+  output$cryptic_spliceai_out <- renderUI({
+    r <- cryptic_spliceai()
+    if (is.null(r)) return(NULL)
+    if (!is.null(r$error)) return(l2b_warn(r$error))
+    div(class = "l2b-aside-note", style = "margin-top:10px;",
+        tags$b(sprintf("SpliceAI %.2f", r$prob)),
+        sprintf(" reference %s probability for %s:%s. ", r$kind, r$chrom, format(r$pos, big.mark = ",")),
+        if (!is.na(r$offset) && r$offset != 0L)
+          sprintf("The model places its strongest call %d bp %s. ", abs(r$offset),
+                  if (r$offset > 0) "downstream" else "upstream") else "",
+        tags$span(style = "color:var(--l2b-text-faint);",
+                  sprintf("Lit2Bench's own score for the same site: %s.", r$local)))
+  })
+  observeEvent(input$cryptic_spliceai_go, {
+    req(cryptic_res())
+    sel <- input$cryptic_junc_tbl_rows_selected
+    if (is.null(sel) || length(sel) == 0) {
+      cryptic_spliceai(list(error = "Select a junction row first.")); return(invisible())
+    }
+    df <- cryptic_junc_filtered()[sel, ]
+    r <- cryptic_res()
+    # The novel end is the one worth asking about; fall back to the acceptor
+    # when the table has no strength columns (no matrix built yet).
+    kind <- if (!is.null(df$novel_end) && !is.na(df$novel_end) && df$novel_end %in% c("donor", "acceptor"))
+              df$novel_end else "acceptor"
+    strand <- if (!is.null(r$transcript) && !is.null(r$transcript$strand)) r$transcript$strand[1] else "+"
+    local_txt <- if (!is.null(df$novel_score) && !is.na(df$novel_score))
+                   sprintf("%.1f bits", df$novel_score) else "not computed (no matrix built)"
+    l2b_log("spliceai_lookup", tool = "cryptic")   # not a run -- see above
+    withProgress(message = "Asking SpliceAI...", value = 0.5, {
+      out <- splice_ai_site(r$chrom, df$start, df$end, kind, strand, input$cryptic_assembly)
+    })
+    if (!is.null(out$error)) { cryptic_spliceai(out); return(invisible()) }
+    out$kind <- kind; out$chrom <- r$chrom
+    out$pos <- .splice_ai_probe_pos(kind, df$start, df$end, strand)
+    out$local <- local_txt
+    cryptic_spliceai(out)
   })
 
   observeEvent(input$cryptic_design_junc_go, {

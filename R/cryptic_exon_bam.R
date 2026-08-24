@@ -713,7 +713,8 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                                        exon_len_range = c(20, 400),
                                        window_seq = NULL, window_seq_start = NULL,
                                        unanchored_read_mult = 3, min_fold_enrichment = 5,
-                                       min_fold_enrichment_strong = 3, known_exons = NULL) {
+                                       min_fold_enrichment_strong = 3, known_exons = NULL,
+                                       splice_pwm = NULL) {
   empty_nj <- data.frame(start = integer(0), end = integer(0), kd_reads = integer(0),
                          control_reads = integer(0), fold_enrichment = numeric(0),
                          anchor_donor = logical(0), anchor_acceptor = logical(0), exitron = logical(0),
@@ -852,6 +853,28 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
                    "anchor_acceptor", "exitron", "motif_class", "motif_canonical", "confidence")]
   names(novel)[names(novel) == "reads"] <- "kd_reads"
   rownames(novel) <- NULL
+
+  # ---- splice-site strength: DISPLAY ONLY --------------------------------
+  # Deliberately computed here, AFTER `novel` is final, and never above.
+  # `motif_canonical` up at the confidence block feeds strong_site -> fold_bar
+  # -> which junctions pass at all; a continuous strength score wired into that
+  # path would silently change what the detector finds, including the SETX-style
+  # true positive the tiered bar was added to stop dropping. Adding columns to a
+  # finished table cannot do that. Moving this call earlier would be a
+  # behaviour change disguised as a refactor.
+  #
+  # Pure arithmetic over sequence already in hand, so it stays on the cheap side
+  # of the expensive/cheap split -- re-running after a threshold tweak, and
+  # panning the tiled viewer, cost no extra I/O.
+  if (!is.null(splice_pwm) && nrow(novel) > 0 &&
+      !is.null(window_seq) && !is.null(window_seq_start)) {
+    nstrand <- vapply(seq_len(nrow(novel)), function(i) {
+      st <- .junction_motif(novel$start[i], novel$end[i], window_seq, window_seq_start)$strand
+      if (is.null(st)) NA_character_ else st
+    }, character(1))
+    novel <- annotate_junction_strength(novel, window_seq, window_seq_start, splice_pwm,
+                                        strand = nstrand, reference_junctions = known_junc)
+  }
 
   # Per-bracket pairing: for each real intron (annotated or major-observed),
   # find novel junctions that keep ITS start (donor-preserving, acceptor

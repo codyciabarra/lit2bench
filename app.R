@@ -63,6 +63,12 @@ source("R/protein_consequence.R")
 source("R/dilution.R")
 source("R/plasmid_creator.R")
 source("R/plasmid_map.R")
+# The splice layer, in dependency order: pure scoring, then the matrix builder
+# that feeds it, then the optional third-party second opinion. Sourced before
+# cryptic_exon_bam.R / cryptic_tile.R, which both call into it.
+source("R/splice_score.R")
+source("R/splice_pwm.R")
+source("R/splice_ai.R")
 source("R/cryptic_exon_bam.R")
 source("R/cryptic_tile.R")
 source("R/differential_splicing.R")
