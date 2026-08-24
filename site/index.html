@@ -113,7 +113,7 @@
     <p class="hero-lead">
       Detect cryptic splicing from any knockdown or perturbation, design and validate the
       assays that confirm it, and keep the whole workflow — from primer to gel to lab
-      notebook — in one place. Nineteen tools, one app, entirely on your own machine.
+      notebook — in one place. Twenty tools, one app, entirely on your own machine.
     </p>
     <div class="hero-cta">
       <a class="btn btn-primary btn-lg" href="#download">
@@ -140,7 +140,7 @@
     </div>
 
     <div class="stats">
-      <div class="stat glass reveal"><b data-count="19">19</b><span>tools, from BAM to ordering sheet</span></div>
+      <div class="stat glass reveal"><b data-count="20">20</b><span>tools, from BAM to ordering sheet</span></div>
       <div class="stat glass reveal"><b data-count="4">4</b><span>classes of splicing defect detected</span></div>
       <div class="stat glass reveal"><b data-count="0">0</b><span>bytes of your data leave the machine</span></div>
       <div class="stat glass reveal"><b>MIT</b><span>licensed, and free forever</span></div>
@@ -197,7 +197,7 @@
   <div class="wrap">
     <div class="sec-head reveal">
       <span class="eyebrow">The toolset</span>
-      <h2>Nineteen tools that hand off to each other</h2>
+      <h2>Twenty tools that hand off to each other</h2>
       <p>
         Pick an exon in one tool and it arrives pre-filled in the next. Filter by what
         you're doing, or search for the thing you need.
@@ -255,6 +255,13 @@
         <div class="tool-ico">✂️</div>
         <h3>Exon Extractor</h3>
         <p>Pulls real exon and intron sequence for a chosen transcript, exports BED/FASTA/CSV/JSON/GTF, and hands a chosen exon straight to the primer designer — no copying coordinates by hand.</p>
+        <span class="grp">Design</span>
+      </article>
+
+      <article class="tool glass reveal" data-group="Design">
+        <div class="tool-ico">🧮</div>
+        <h3>Splice Code</h3>
+        <p>Why would an exon here be silent in the first place? Scores every splice site in a transcript against a matrix built by counting real annotated sites, so you can see where a cryptic site ranks among the gene&rsquo;s own &mdash; weak-for-this-gene is what a repressed site looks like. Adds the polypyrimidine tract, the branch-point consensus, and two independent kinds of TDP-43 evidence: strand-aware UG richness, and measured binding from published ENCODE eCLIP. Needs no BAM files.</p>
         <span class="grp">Design</span>
       </article>
 

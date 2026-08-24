@@ -62,6 +62,12 @@ the box — no hunting down Bioconductor packages by hand.
   optional SpliceAI second opinion on a single site; any candidate exon can be
   checked for **TDP-43 evidence** — strand-aware UG richness plus measured
   ENCODE eCLIP binding.
+- **Splice Code** — why an exon here would be silent at all: scores every splice
+  site in a transcript against a matrix built by counting real annotated sites,
+  so a cryptic site's rank among the gene's own is visible (weak-for-this-gene is
+  the signature). Adds the polypyrimidine tract, the branch-point consensus, and
+  two kinds of TDP-43 evidence — strand-aware UG richness, and measured binding
+  from ENCODE eCLIP. No BAMs needed.
 - **Protein Consequence** — takes a cryptic exon and works out what it does to
   the protein: splices it into the real annotated transcript, translates from the
   annotated start codon, and reports the frameshift, the premature stop, whether
