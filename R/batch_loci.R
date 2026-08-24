@@ -49,6 +49,32 @@ parse_loci_list <- function(text) {
        total = as.integer(nrow(nj)))
 }
 
+#' Splice-site strength of the locus' TOP hit -- the novel junction carrying the
+#' most knockdown reads, which is the one .batch_headline() is about.
+#'
+#' Deliberately the top hit rather than the weakest site in the locus. The
+#' weakest scoring junction is usually the one that is not a real splice site at
+#' all -- a fabricated acceptor scores 0th percentile, as the synthetic test in
+#' this repo shows -- so ranking a panel by minimum would sort noise to the top
+#' and bury the real events. The top hit's strength answers the question a
+#' person scanning a gene list actually has: of the things this locus found, is
+#' the main one weak for its own gene?
+#'
+#' Returns NAs when no matrix has been built for the assembly, in which case
+#' detect_cryptic_candidates() never added the columns at all.
+.batch_site_strength <- function(res) {
+  none <- list(pct = NA_real_, score = NA_real_, end = NA_character_)
+  nj <- res$candidates$novel_junctions
+  if (is.null(nj) || nrow(nj) == 0) return(none)
+  if (!all(c("novel_pct", "novel_score", "novel_end") %in% names(nj))) return(none)
+  usable <- which(!is.na(nj$novel_pct))
+  if (length(usable) == 0) return(none)
+  reads <- if ("kd_reads" %in% names(nj)) nj$kd_reads[usable] else rep(1L, length(usable))
+  i <- usable[which.max(reads)]
+  list(pct = nj$novel_pct[i], score = nj$novel_score[i],
+       end = if (is.na(nj$novel_end[i])) NA_character_ else nj$novel_end[i])
+}
+
 #' Pick a single plain-language headline for a locus, strongest signal first.
 .batch_headline <- function(res) {
   ce <- res$candidates$candidate_exons
@@ -87,7 +113,9 @@ parse_loci_list <- function(text) {
 #' @return list(summary = data.frame, results = list of full result objects
 #'   (one per row, NULL for failed loci), loci = the parsed tokens). summary has
 #'   one row per locus: locus, region, cryptic_exons, novel_junctions, exitrons,
-#'   retained_introns, min_q, headline, status ("hit"/"clear"/"error"), error.
+#'   retained_introns, min_q, site_pct/site_score/site_end (the top hit's
+#'   splice-site strength, all NA when no matrix has been built), headline,
+#'   status ("hit"/"clear"/"error"), error.
 run_batch_loci <- function(loci_text, control_bams, kd_bams, assembly,
                            thresholds, cache, progress = NULL) {
   loci <- parse_loci_list(loci_text)
@@ -113,6 +141,7 @@ run_batch_loci <- function(loci_text, control_bams, kd_bams, assembly,
       minq <- if (!is.null(res$differential) && nrow(res$differential) > 0)
                 suppressWarnings(min(res$differential$q_value, na.rm = TRUE)) else NA_real_
       any_hit <- ce_n > 0 || jc$total > 0 || ri_n > 0 || (is.finite(minq) && minq < 0.05)
+      st <- .batch_site_strength(res)
 
       data.frame(
         locus = tok,
@@ -124,6 +153,7 @@ run_batch_loci <- function(loci_text, control_bams, kd_bams, assembly,
         exitrons = jc$exitron,
         retained_introns = ri_n,
         min_q = minq,
+        site_pct = st$pct, site_score = st$score, site_end = st$end,
         headline = .batch_headline(res),
         status = if (any_hit) "hit" else "clear",
         error = NA_character_,
@@ -133,6 +163,7 @@ run_batch_loci <- function(loci_text, control_bams, kd_bams, assembly,
         locus = tok, region = NA_character_,
         cryptic_exons = NA_integer_, novel_junctions = NA_integer_,
         exitrons = NA_integer_, retained_introns = NA_integer_, min_q = NA_real_,
+        site_pct = NA_real_, site_score = NA_real_, site_end = NA_character_,
         headline = "—", status = "error", error = conditionMessage(e),
         stringsAsFactors = FALSE)
     })

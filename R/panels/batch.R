@@ -114,7 +114,22 @@ server_batch <- function(input, output, session, ctx) {
       Finding = ifelse(s$status == "error", paste("Error:", s$error), s$headline),
       .status = s$status,
       check.names = FALSE)
-    status_col <- ncol(out) - 1L   # 0-indexed position of the hidden .status column
+    # Splice-site strength of each locus' top hit -- present only when a matrix
+    # has been built for this assembly (Splice Code -> "Build the matrix").
+    # Inserted before Finding so the numbers stay together and the sentence
+    # stays last. Absent rather than dashed: a column of dashes reads as
+    # "measured, nothing there" instead of "not measured".
+    # Assign then reorder rather than cbind(): cbind.data.frame() forwards
+    # check.names to data.frame(), which already has it here, and errors with
+    # "formal argument matched by multiple actual arguments".
+    if (any(!is.na(s$site_pct))) {
+      out[["Top site"]] <- ifelse(is.na(s$site_pct), "—",
+        sprintf("%s %s pct", tools::toTitleCase(ifelse(is.na(s$site_end), "site", s$site_end)),
+                l2b_ordinal(s$site_pct)))
+      tail_cols <- c("Top site", "Finding", ".status")
+      out <- out[, c(setdiff(names(out), tail_cols), tail_cols), drop = FALSE]
+    }
+    status_col <- which(names(out) == ".status") - 1L   # 0-indexed, wherever it ended up
     dt <- datatable(out, rownames = FALSE, selection = "single",
                     options = list(dom = "t", paging = FALSE, ordering = TRUE,
                                    columnDefs = list(list(visible = FALSE, targets = status_col))))
