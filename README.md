@@ -54,7 +54,14 @@ the box — no hunting down Bioconductor packages by hand.
   reopens across sessions.
 - **Cryptic Splicing Engine** — read control vs. knockdown RNA-seq BAMs over a
   locus and flag cryptic exons, cryptic splice sites, exitrons, and intron
-  retention in an IGV-style sashimi plot. Double-click to zoom.
+  retention in an IGV-style sashimi plot. Drag to pan, double-click or use the
+  zoom buttons to move in and out — reads are tiled, so navigating the locus
+  costs arithmetic rather than re-reading the BAM.
+- **Protein Consequence** — takes a cryptic exon and works out what it does to
+  the protein: splices it into the real annotated transcript, translates from the
+  annotated start codon, and reports the frameshift, the premature stop, whether
+  the transcript is predicted to be degraded by NMD (55-nt rule), and which
+  UniProt domains the truncation removes.
 - **Design** — Transcript Explorer, Exon Extractor, Primer & Schematic designer,
   Panel Runner (batch cryptic detection), Plasmid Creator, Gibson Assembly primer
   designer, PCR Setup calculator, and **Plasmid QC** — align Plasmidsaurus reads
@@ -89,7 +96,11 @@ separate install.
 
 | Path | What it is |
 |------|------------|
-| `app.R`, `R/` | the Shiny app — one file per tool |
+| `app.R` | a ~200-line shell: sources, the page shell, and two loops over the tool registry |
+| `R/registry.R` | the tool registry — one entry per tool, driving the nav, the tabs and the right rail |
+| `R/panels/<id>.R` | one file per tool: its `panel_<id>()` UI and `server_<id>()` logic |
+| `R/*.R` | the computation behind the tools — BAM I/O, primer design, translation, SVG figures |
+| `scripts/` | `check_unresolved.R` (run it after moving code between panel files) and the download-stats snapshot |
 | `installer/` | packages the repo into `Lit2Bench.app` + a `.dmg` — see [installer/README.md](installer/README.md) |
 | `site/` | the product website (static; deployed to GitHub Pages) |
 
