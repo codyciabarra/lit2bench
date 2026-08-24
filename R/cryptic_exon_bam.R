@@ -868,12 +868,31 @@ detect_cryptic_candidates <- function(control_junc, kd_junc, known_junc,
   # panning the tiled viewer, cost no extra I/O.
   if (!is.null(splice_pwm) && nrow(novel) > 0 &&
       !is.null(window_seq) && !is.null(window_seq_start)) {
-    nstrand <- vapply(seq_len(nrow(novel)), function(i) {
-      st <- .junction_motif(novel$start[i], novel$end[i], window_seq, window_seq_start)$strand
+    .motif_strand <- function(s, e) {
+      st <- .junction_motif(s, e, window_seq, window_seq_start)$strand
       if (is.null(st)) NA_character_ else st
-    }, character(1))
+    }
+    nstrand <- vapply(seq_len(nrow(novel)), function(i)
+      .motif_strand(novel$start[i], novel$end[i]), character(1))
+
+    # The gene-local percentile is only meaningful if the ANNOTATED sites are
+    # read in their own orientation too. known_junc carries no strand -- it is
+    # shared with the annotated-key matching and the bracket pairing, neither of
+    # which needs one -- so derive it here the same way the novel rows do, from
+    # the junction's own boundary dinucleotides rather than from annotation.
+    #
+    # Without this, every annotated site on a minus-strand gene is scored as
+    # plus, scores like noise, and every novel site trivially beats all of them.
+    # Measured on UNC13A (all four transcripts minus): all 11 novel junctions
+    # reported "100th pct" before this, and the percentile -- the number that is
+    # supposed to answer "is this weak FOR THIS GENE" -- was meaningless.
+    ref <- known_junc
+    if (!is.null(ref) && nrow(ref) > 0) {
+      ref$strand <- vapply(seq_len(nrow(ref)), function(i)
+        .motif_strand(ref$start[i], ref$end[i]), character(1))
+    }
     novel <- annotate_junction_strength(novel, window_seq, window_seq_start, splice_pwm,
-                                        strand = nstrand, reference_junctions = known_junc)
+                                        strand = nstrand, reference_junctions = ref)
   }
 
   # Per-bracket pairing: for each real intron (annotated or major-observed),
