@@ -530,18 +530,45 @@ cached_track_data <- function(cache, bam_paths, chrom, start, end, index_stems =
 
 #' lookup_transcripts_in_region() (design_splicing_primers.R), memoized on the
 #' window -- a network round-trip that returns the same annotation every time
-#' within a session. Failure stays soft (empty list), matching the caller's
-#' existing "annotation is best-effort" behavior, but is NOT cached, so a
-#' transient network blip doesn't poison the rest of the session.
+#' within a session. Neither failure mode is cached, so a transient network
+#' blip doesn't poison the rest of the session.
+#'
+#' AN EMPTY ANSWER AND A FAILED LOOKUP ARE NOT THE SAME THING, and collapsing
+#' them is a false negative that looks exactly like a real result. Detection
+#' calls a junction "cryptic" relative to the annotation, so with no annotation
+#' it reports nothing -- correct for a window that genuinely has none (chrM,
+#' single-exon genes, intergenic), and badly wrong when the fetch merely
+#' failed: the run then says "no cryptic splicing here" because the network
+#' was down. Measured: a UCSC rate limit silently zeroed 48 of 98 loci in a
+#' validation run, each looking like a clean negative.
+#'
+#' So the two are tagged apart, the same distinction clip_peaks.R draws between
+#' `no_coverage` (the experiment cannot speak to this locus) and `unavailable`
+#' (the lookup did not happen). lookup_transcripts_in_region() already
+#' separates them by message: "No transcripts found" is a real answer about the
+#' window, anything else is a transport failure.
 cached_transcripts <- function(cache, chrom, start, end, assembly = "hg38") {
   key <- paste("tx", assembly, chrom, start, end, sep = "|")
   hit <- if (is.null(cache)) NULL else cache[[key]]
   if (!is.null(hit)) return(hit)
   val <- tryCatch(lookup_transcripts_in_region(chrom, start, end, assembly = assembly),
-                  error = function(e) NULL)
-  if (is.null(val)) return(list())
+                  error = function(e) e)
+  if (inherits(val, "error")) {
+    msg <- conditionMessage(val)
+    out <- list()
+    attr(out, "l2b_annotation") <- if (grepl("No transcripts found", msg, fixed = TRUE))
+      "empty" else "failed"
+    attr(out, "l2b_annotation_error") <- msg
+    return(out)
+  }
   if (!is.null(cache)) assign(key, val, envir = cache)
   val
+}
+
+#' TRUE when the annotation lookup failed rather than legitimately came back
+#' empty. Callers that would otherwise report "nothing found" must check this.
+annotation_lookup_failed <- function(transcripts) {
+  identical(attr(transcripts, "l2b_annotation"), "failed")
 }
 
 # --------------------------------------------------------------------------

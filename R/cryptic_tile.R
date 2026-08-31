@@ -113,13 +113,27 @@ cached_bam_tile <- function(cache, bam_paths, chrom, start, end, index_stems = b
 #' annotation and reference sequence over the same span. `assembly` is carried
 #' so a caller can tell whether a cached bundle matches the build it wants.
 build_tile_bundle <- function(chrom, start, end, control_bams, kd_bams, assembly, cache) {
+  # A bundle carries the annotation every window sliced from it is judged
+  # against, so a FAILED annotation lookup (as opposed to a window that
+  # genuinely has none) poisons every answer derived from it -- and does so
+  # silently, as "no cryptic splicing found". Fail here, where the network data
+  # enters, rather than letting it surface as a confident empty result.
+  tx <- cached_transcripts(cache, chrom, start, end, assembly = assembly)
+  if (annotation_lookup_failed(tx)) {
+    stop(sprintf(paste("Couldn't load the reference annotation for %s:%s-%s, so there is nothing to call",
+                       "cryptic splicing against. This is a failed lookup, not an empty result -- rerun",
+                       "when the connection is back. (%s)"),
+                 chrom, format(start, big.mark = ",", trim = TRUE),
+                 format(end, big.mark = ",", trim = TRUE),
+                 attr(tx, "l2b_annotation_error") %||% "no detail"), call. = FALSE)
+  }
   list(
     chrom = chrom, start = as.integer(start), end = as.integer(end), assembly = assembly,
     control = cached_bam_tile(cache, control_bams$paths, chrom, start, end,
                               index_stems = control_bams$index_stems),
     kd = cached_bam_tile(cache, kd_bams$paths, chrom, start, end,
                          index_stems = kd_bams$index_stems),
-    transcripts = cached_transcripts(cache, chrom, start, end, assembly = assembly),
+    transcripts = tx,
     seq = cached_genomic_seq(cache, chrom, start, end, assembly = assembly)
   )
 }
