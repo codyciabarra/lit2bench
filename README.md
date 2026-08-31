@@ -61,7 +61,16 @@ the box — no hunting down Bioconductor packages by hand.
   gene (weak-for-this-gene is what a repressed cryptic site looks like), with an
   optional SpliceAI second opinion on a single site; any candidate exon can be
   checked for **RNA-binding-protein evidence** — strand-aware motif richness plus
-  measured ENCODE eCLIP binding, for whichever of 176 proteins you pick.
+  measured ENCODE eCLIP binding, for whichever of 176 proteins you pick — and for
+  **coverage evidence**, whether the exon body itself is elevated in knockdown
+  against its own intron's background.
+
+  It is a **screen**, and it says which part of its answer to trust. Validated
+  against 94 published cryptic exons on a real knockdown pair: gene-level
+  balanced accuracy ~61%, and a `Junction confidence` tier that grades the
+  flanking junctions rather than the span between them — a called span
+  overlapped the documented exon about 10% of the time. Treat the locus as the
+  finding and check coordinates on the plot before designing against them.
 - **Splice Code** — why an exon here would be silent at all: scores every splice
   site in a transcript against a matrix built by counting real annotated sites,
   so a cryptic site's rank among the gene's own is visible (weak-for-this-gene is
