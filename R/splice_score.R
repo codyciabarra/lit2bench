@@ -166,46 +166,53 @@ splice_percentile <- function(score, reference_scores) {
 }
 
 # --------------------------------------------------------------------------
-# 3. TDP-43 UG repeats
+# 3. Tandem repeat runs
 # --------------------------------------------------------------------------
 
-#' Find UG (TG on DNA) repeat runs -- TDP-43's binding signature.
+#' Find perfect tandem repeat runs of a unit -- e.g. (UG)n, (CA)n, poly-U.
 #'
-#' Pure string matching, no matrix and no model: TDP-43 binds UG-repeat RNA,
-#' affinity rises with the number of repeats, and runs of ~6 or more are the
-#' high-affinity ones. Both registers are searched ((TG)n and (GT)n) because a
-#' run's phase depends only on where you start reading.
+#' Pure string matching, no matrix and no model. Every rotation of the unit is
+#' searched, because a run's phase depends only on where you start reading:
+#' (TG)n and (GT)n find the same run offset by one base, and the longer call wins.
 #'
-#' @param seq plus-strand sequence.
-#' @param seq_start genomic coordinate of seq's first base.
-#' @param min_units shortest run to report.
-#' @return data.frame(start, end, units, strand_seq) in genomic coordinates,
-#'         descending by units.
-find_ug_repeats <- function(seq, seq_start = 1L, min_units = 4L) {
+#' Only some proteins have a documented high-affinity tandem form -- TDP-43's UG
+#' repeats are the clearest case, hnRNP L's CA repeats and hnRNP C's poly-U the
+#' others. rbp_motifs.R marks which, and a protein with no `tandem` entry does
+#' not get this measure reported at all, rather than getting it reported as
+#' having found nothing.
+#'
+#' @param unit repeat unit as DNA, e.g. "TG", "CA", "T".
+#' @param min_units shortest run to report, in units.
+#' @return data.frame(start, end, units, seq) in genomic coordinates.
+find_tandem_repeats <- function(seq, seq_start = 1L, unit = "TG", min_units = 4L) {
   empty <- data.frame(start = integer(0), end = integer(0), units = integer(0),
                       seq = character(0), stringsAsFactors = FALSE)
   if (is.null(seq) || is.na(seq) || !nzchar(seq)) return(empty)
-  s <- toupper(seq)
+  if (is.null(unit) || !nzchar(unit)) return(empty)
+  s <- toupper(seq); u <- toupper(unit); k <- nchar(u)
 
+  rots <- unique(vapply(seq_len(k) - 1L,
+                        function(i) paste0(substr(u, i + 1L, k), substr(u, 1L, i)),
+                        character(1)))
   hits <- list()
-  for (unit in c("TG", "GT")) {
-    pat <- sprintf("(%s){%d,}", unit, min_units)
+  for (rot in rots) {
+    pat <- sprintf("(%s){%d,}", rot, min_units)
     m <- gregexpr(pat, s)[[1]]
     if (m[1] == -1) next
     lens <- attr(m, "match.length")
-    for (k in seq_along(m)) {
+    for (j in seq_along(m)) {
       hits[[length(hits) + 1L]] <- data.frame(
-        start = seq_start + m[k] - 1L,
-        end   = seq_start + m[k] + lens[k] - 2L,
-        units = as.integer(lens[k] %/% 2L),
-        seq   = substr(s, m[k], m[k] + lens[k] - 1L),
+        start = seq_start + m[j] - 1L,
+        end   = seq_start + m[j] + lens[j] - 2L,
+        units = as.integer(lens[j] %/% k),
+        seq   = substr(s, m[j], m[j] + lens[j] - 1L),
         stringsAsFactors = FALSE)
     }
   }
   if (length(hits) == 0) return(empty)
   out <- do.call(rbind, hits)
 
-  # (TG)n and (GT)n find the same run offset by one base; keep the longer call.
+  # Rotations find the same run at neighbouring offsets; keep the longer call.
   out <- out[order(-out$units), , drop = FALSE]
   keep <- rep(TRUE, nrow(out))
   for (i in seq_len(nrow(out))) {
@@ -217,6 +224,11 @@ find_ug_repeats <- function(seq, seq_start = 1L, min_units = 4L) {
   out <- out[keep, , drop = FALSE]
   rownames(out) <- NULL
   out[order(-out$units, out$start), , drop = FALSE]
+}
+
+#' TDP-43's UG runs -- the original caller, now one unit among several.
+find_ug_repeats <- function(seq, seq_start = 1L, min_units = 4L) {
+  find_tandem_repeats(seq, seq_start, unit = "TG", min_units = min_units)
 }
 
 # --------------------------------------------------------------------------
@@ -364,15 +376,15 @@ annotate_junction_strength <- function(junctions, window_seq, window_start, pwm,
 }
 
 # --------------------------------------------------------------------------
-# 6. TDP-43 UG context (degenerate)
+# 6. Motif richness in context (degenerate binding)
 # --------------------------------------------------------------------------
-# find_ug_repeats() above matches PERFECT (UG)n tandem runs. That is the
-# high-affinity ideal and it stays -- when one is there it is the strongest
-# sequence evidence available. But it is not how most real sites look, and
-# taking it as the whole measure fails on the best-characterized example there
-# is: measured on the UNC13A cryptic exon against the real SCR/TDP43KD pair,
-# there is NO (UG)>=4 run within 1.5 kb, none at >=6 within 15 kb, and the one
-# >=4 in range sits 12 kb away.
+# find_tandem_repeats() above matches PERFECT runs. That is the high-affinity
+# ideal and it stays -- when one is there it is the strongest sequence evidence
+# available. But it is not how most real sites look, and taking it as the whole
+# measure fails on the best-characterized example there is: measured on the
+# UNC13A cryptic exon against the real SCR/TDP43KD pair, there is NO (UG)>=4 run
+# within 1.5 kb, none at >=6 within 15 kb, and the one >=4 in range sits 12 kb
+# away.
 #
 # The same region read as UG-RICHNESS rather than tandem repeat, strand-aware,
 # shows the expected architecture plainly (30-nt windows, minus-strand gene so
@@ -385,33 +397,48 @@ annotate_junction_strength <- function(junctions, window_seq, window_start, pwm,
 # with discrete 40-45% blocks at +215 and +267 nt. That is TDP-43 repression as
 # it is usually described: UG-rich intronic sequence just 5' of the exon.
 #
-# So both measures ship. Neither is asserted to BE the repressive element --
+# So both measures ship. Neither is asserted to BE the regulatory element --
 # these report measured sequence composition, and clip_peaks.R is what brings
 # actual measured binding.
+#
+# NOTHING BELOW IS SPECIFIC TO UG. Every function takes a k-mer set, so the same
+# arithmetic reads RBFOX2's GCAUG, NOVA's YCAY, hnRNP C's poly-U, or any other
+# registered motif. rbp_motifs.R supplies both the k-mers and the density floor,
+# and that floor is derived from how often the motif occurs by chance rather
+# than shared with TDP-43 -- UG starts an eighth of all dinucleotide positions
+# and GCAUG one position in 1024, so a single absolute cutoff would mean
+# "enriched" for one protein and "impossible" for another. The ug_* names at the
+# end are thin wrappers, kept because the TDP-43 paths read them.
 
-#' Sliding UG/TG dinucleotide density along a sequence.
+#' Sliding density of a k-mer set along a sequence.
 #'
-#' @return numeric of length nchar(seq)-1, NA at the window's edges. Index i
+#' Density is the fraction of positions that START a match, which for the 2-mer
+#' set {TG, GT} is exactly the UG measure this began as.
+#'
+#' @param kmers concrete equal-length k-mers (rbp_motif_kmers() expands IUPAC).
+#' @return numeric of length nchar(seq)-k+1, NA at the window's edges. Index i
 #'         corresponds to genomic seq_start + i - 1.
-ug_density_profile <- function(seq, window = 30L) {
-  if (is.null(seq) || is.na(seq) || nchar(seq) < window + 1L) return(numeric(0))
-  s <- toupper(seq); n <- nchar(s)
-  d <- substring(s, 1:(n - 1L), 2:n)
-  as.numeric(stats::filter(as.numeric(d %in% c("TG", "GT")), rep(1 / window, window), sides = 2))
+motif_density_profile <- function(seq, kmers, window = 30L) {
+  if (is.null(seq) || is.na(seq) || is.null(kmers) || !length(kmers)) return(numeric(0))
+  k <- nchar(kmers[1]); s <- toupper(seq); n <- nchar(s)
+  if (n < window + k - 1L) return(numeric(0))
+  d <- substring(s, seq_len(n - k + 1L), seq(k, n))
+  as.numeric(stats::filter(as.numeric(d %in% kmers), rep(1 / window, window), sides = 2))
 }
 
-#' Contiguous blocks whose UG density stays above a threshold.
+#' Contiguous blocks whose motif density stays above a threshold.
 #'
 #' @param min_density absolute floor. The caller normally passes a percentile of
-#'        a locally-measured background rather than a constant -- UG density
-#'        varies enough between genes that a fixed cutoff means different things
-#'        in different places.
+#'        a locally-measured background rather than a constant -- density varies
+#'        enough between genes that a fixed cutoff means different things in
+#'        different places -- and rbp_motifs.R supplies a per-motif fallback
+#'        rather than one shared number.
 #' @return data.frame(start, end, width, peak_density, mean_density), strongest first.
-ug_rich_blocks <- function(seq, seq_start = 1L, window = 30L,
-                           min_density = 0.25, min_width = 20L) {
+motif_rich_blocks <- function(seq, seq_start = 1L, kmers, window = 30L,
+                              min_density = 0.25, min_width = 20L) {
   empty <- data.frame(start = integer(0), end = integer(0), width = integer(0),
                       peak_density = numeric(0), mean_density = numeric(0))
-  p <- ug_density_profile(seq, window)
+  p <- motif_density_profile(seq, kmers, window)
   if (length(p) == 0) return(empty)
   pos <- seq_start + seq_along(p) - 1L
   hi <- which(!is.na(p) & p >= min_density)
@@ -431,30 +458,40 @@ ug_rich_blocks <- function(seq, seq_start = 1L, window = 30L,
   out
 }
 
-#' Strand-aware UG context around a feature (a cryptic exon, or a splice site).
+#' Strand-aware motif context around a feature (a cryptic exon, or a splice site).
 #'
 #' "Upstream" means upstream IN TRANSCRIPT ORDER, which on a minus-strand gene
 #' is the HIGHER genomic coordinate. That distinction is the whole measurement:
-#' at UNC13A the upstream/downstream ratio is ~4.5x, and computing it
+#' at UNC13A the TDP-43 upstream/downstream ratio is ~4.5x, and computing it
 #' plus-strand-blind would average the two sides together and report nothing.
 #'
-#' @param seq plus-strand reference covering feature +/- flank.
+#' Which side means what depends on the protein, and this function deliberately
+#' does not decide. It reports both sides and their ratio, and nothing more.
+#' RBFOX2 bound downstream of an exon enhances it and bound upstream represses
+#' it, so collapsing the two sides into one "signal" number here would destroy
+#' the only thing that tells those two situations apart.
+#'
+#' @param kmers concrete k-mers to count.
 #' @param background optional numeric vector of density values from elsewhere in
 #'        the same gene; when supplied, blocks are called against its 95th
 #'        percentile and a z-score is reported.
-#' @return list(upstream, downstream, feature, ratio, z_peak, blocks, window)
-#'         where blocks carry `side` ("upstream"/"downstream"/"overlapping") and
-#'         `distance` in transcript orientation.
-tdp43_ug_context <- function(seq, seq_start, feat_start, feat_end, strand = "+",
-                             window = 30L, flank = 500L, background = NULL) {
+#' @param min_density fallback floor when no background is supplied.
+#' @return list(upstream, downstream, feature, ratio, z_peak, blocks, window,
+#'         flank, strand) where blocks carry `side`
+#'         ("upstream"/"downstream"/"overlapping") and `distance` in transcript
+#'         orientation.
+rbp_motif_context <- function(seq, seq_start, feat_start, feat_end, strand = "+",
+                              kmers = c("GT", "TG"), window = 30L, flank = 500L,
+                              background = NULL, min_density = 0.25) {
   minus <- identical(strand, "-")
+  k <- if (length(kmers)) nchar(kmers[1]) else 2L
   sub_density <- function(a, b) {
     i <- a - seq_start + 1L; j <- b - seq_start + 1L
     if (i < 1L || j > nchar(seq) || j <= i) return(NA_real_)
     s <- toupper(substr(seq, i, j)); n <- nchar(s)
-    if (n < 2L) return(NA_real_)
-    d <- substring(s, 1:(n - 1L), 2:n)
-    mean(d %in% c("TG", "GT"))
+    if (n < k) return(NA_real_)
+    d <- substring(s, seq_len(n - k + 1L), seq(k, n))
+    mean(d %in% kmers)
   }
   # transcript-upstream is the high side on the minus strand
   up   <- if (minus) sub_density(feat_end + 1L, feat_end + flank) else sub_density(feat_start - flank, feat_start - 1L)
@@ -463,8 +500,8 @@ tdp43_ug_context <- function(seq, seq_start, feat_start, feat_end, strand = "+",
 
   thr <- if (!is.null(background) && length(background)) {
     as.numeric(stats::quantile(background[!is.na(background)], 0.95))
-  } else 0.25
-  blocks <- ug_rich_blocks(seq, seq_start, window = window, min_density = thr)
+  } else min_density
+  blocks <- motif_rich_blocks(seq, seq_start, kmers, window = window, min_density = thr)
 
   if (nrow(blocks)) {
     mid <- (blocks$start + blocks$end) / 2
@@ -481,7 +518,7 @@ tdp43_ug_context <- function(seq, seq_start, feat_start, feat_end, strand = "+",
   if (!is.null(background) && length(background)) {
     b <- background[!is.na(background)]
     if (length(b) > 1 && stats::sd(b) > 0) {
-      p <- ug_density_profile(seq, window)
+      p <- motif_density_profile(seq, kmers, window)
       if (length(p)) z <- (max(p, na.rm = TRUE) - mean(b)) / stats::sd(b)
     }
   }
@@ -489,3 +526,17 @@ tdp43_ug_context <- function(seq, seq_start, feat_start, feat_end, strand = "+",
        ratio = if (is.na(up) || is.na(down) || down == 0) NA_real_ else up / down,
        z_peak = z, blocks = blocks, window = window, flank = flank, strand = strand)
 }
+
+# ---- the UG names, kept: what the TDP-43 paths call ------------------------
+.UG_KMERS <- c("GT", "TG")
+
+ug_density_profile <- function(seq, window = 30L) motif_density_profile(seq, .UG_KMERS, window)
+
+ug_rich_blocks <- function(seq, seq_start = 1L, window = 30L,
+                           min_density = 0.25, min_width = 20L)
+  motif_rich_blocks(seq, seq_start, .UG_KMERS, window, min_density, min_width)
+
+tdp43_ug_context <- function(seq, seq_start, feat_start, feat_end, strand = "+",
+                             window = 30L, flank = 500L, background = NULL)
+  rbp_motif_context(seq, seq_start, feat_start, feat_end, strand, .UG_KMERS,
+                    window, flank, background, min_density = 0.25)

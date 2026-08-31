@@ -3,7 +3,15 @@
 # Thin panel over splice_code.R, which does the work: locus -> transcript ->
 # ONE genomic fetch for the span -> every annotated splice site scored against a
 # matrix built from real sites -> the cryptic exon's own two sites, its tract
-# and branch point -> TDP-43 evidence from sequence and from measured eCLIP.
+# and branch point -> evidence for whichever RNA-binding protein you picked,
+# from sequence and from measured eCLIP.
+#
+# The protein is a CHOICE, not a constant. TDP-43 is the default because it is
+# what this toolkit was built around, and it is one of 176 in the selector:
+# 26 with a registered binding motif, 168 with published ENCODE eCLIP, 18 with
+# both. Everything above the protein selector -- splice-site strength, the
+# percentiles, the tract, the branch point -- is protein-independent and does
+# not change when you switch.
 #
 # Needs no BAMs. That is deliberate and it is why this is its own tool rather
 # than staying a column inside the Cryptic Engine: the question "is this a
@@ -28,15 +36,20 @@ panel_splicecode <- function() {
         textInput("sc_transcript", "Transcript (optional)", value = "",
                   placeholder = "blank = MANE/RefSeq Select, else longest coding")),
 
-      l2b_card(2, "Cryptic exon (optional)", "Leave blank to just score the gene's own splice sites. Give a span and it is scored against them, with the TDP-43 evidence for that span.",
+      l2b_card(2, "Cryptic exon (optional)", "Leave blank to just score the gene's own splice sites. Give a span and it is scored against them, plus the binding evidence for that span.",
         fluidRow(
           column(6, numericInput("sc_ce_start", "Start", value = NA)),
           column(6, numericInput("sc_ce_end", "End", value = NA))),
-        checkboxInput("sc_clip", "Look up measured TDP-43 binding (ENCODE eCLIP, needs network)", value = TRUE),
         actionButton("sc_from_cryptic", "\U2190 Pull top candidate from Cryptic Engine", class = "btn-alt"),
         uiOutput("sc_handoff_status")),
 
-      l2b_card(3, "Scoring matrix", NULL,
+      l2b_card(3, "Which RNA-binding protein?", "Only the binding evidence depends on this. Splice-site strength, the percentiles, the tract and the branch point are the same whichever protein you pick.",
+        selectizeInput("sc_rbp", NULL, choices = NULL, selected = "TARDBP",
+                       options = list(placeholder = "Search 176 proteins\u2026")),
+        uiOutput("sc_rbp_note"),
+        checkboxInput("sc_clip", "Look up measured binding (ENCODE eCLIP, needs network)", value = TRUE)),
+
+      l2b_card(4, "Scoring matrix", NULL,
         div(class = "l2b-card-sub",
             "Splice-site strength is measured against a matrix built by counting real annotated splice sites — ",
             "not a table typed into the source. One build per assembly (about 15 seconds, needs network), then ",
@@ -56,6 +69,32 @@ server_splicecode <- function(input, output, session, ctx) {
   sc_res <- reactiveVal(NULL); sc_err <- reactiveVal(NULL)
   sc_handoff <- reactiveVal(NULL); sc_pwm_msg <- reactiveVal(NULL)
   sc_pwm_built <- reactiveVal(0)
+
+  # ---- the protein selector ------------------------------------------------
+  # Grouped by what can actually be measured, best-served first, so the cost of
+  # a choice is visible before it is made rather than after the run comes back
+  # half empty. Server-side because 176 options is past what selectize should
+  # ship to the client as literal <option> tags.
+  local({
+    o <- rbp_options()
+    grp <- ifelse(o$has_motif & o$has_clip, "Binding motif and measured eCLIP",
+           ifelse(o$has_motif, "Binding motif only (no ENCODE eCLIP)",
+                               "Measured eCLIP only (no registered motif)"))
+    updateSelectizeInput(session, "sc_rbp", server = TRUE, selected = "TARDBP",
+      choices = data.frame(value = o$symbol,
+                           label = ifelse(o$label == o$symbol, o$symbol,
+                                          sprintf("%s \u2014 %s", o$symbol, o$label)),
+                           optgroup = grp, stringsAsFactors = FALSE))
+  })
+
+  output$sc_rbp_note <- renderUI({
+    r <- input$sc_rbp %||% "TARDBP"; if (!nzchar(r)) return(NULL)
+    i <- rbp_info(r)
+    div(class = "l2b-card-sub", style = "margin-top:8px;",
+        rbp_coverage_note(r),
+        if (i$has_motif) tagList(tags$br(),
+          tags$span(style = "opacity:.75;", sprintf("Motif from %s.", i$source))))
+  })
 
   # ---- the matrix ---------------------------------------------------------
   output$sc_pwm_status <- renderUI({
@@ -126,13 +165,15 @@ server_splicecode <- function(input, output, session, ctx) {
           ce_end   = if (is.na(input$sc_ce_end))   NULL else as.integer(input$sc_ce_end),
           assembly = input$sc_assembly,
           transcript = if (nzchar(trimws(input$sc_transcript %||% ""))) trimws(input$sc_transcript) else NULL,
+          rbp = input$sc_rbp %||% "TARDBP",
           clip = isTRUE(input$sc_clip),
           progress = function(m) incProgress(0.12, detail = m))
         sc_res(out)
         l2b_log("analysis", tool = "splicecode",
                 n_sites = if (is.null(out$sites)) 0L else nrow(out$sites),
                 has_cryptic = !is.null(out$cryptic),
-                clip_status = if (is.null(out$tdp43)) NA_character_ else out$tdp43$clip$status,
+                rbp = out$rbp,
+                clip_status = if (is.null(out$evidence)) NA_character_ else out$evidence$clip$status,
                 secs = round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1))
       }, error = function(e) {
         sc_err(conditionMessage(e))
@@ -148,7 +189,7 @@ server_splicecode <- function(input, output, session, ctx) {
     r <- sc_res()
     if (is.null(r)) return(l2b_empty("\U0001f9ee",
       "Score a gene's splice sites",
-      "Enter a gene and press Read the splice code. Add a cryptic exon span to see how its own splice sites rank against the gene's, and what the TDP-43 evidence looks like."))
+      "Enter a gene and press Read the splice code. Add a cryptic exon span to see how its own splice sites rank against the gene's, and what the binding evidence looks like for the protein you picked."))
 
     cr <- r$cryptic
     tagList(
@@ -183,28 +224,44 @@ server_splicecode <- function(input, output, session, ctx) {
                     cr$branch_point$offset, cr$branch_point$seq, cr$branch_point$matches)
           else "No branch-point consensus match in the 18–40 nt window.")),
 
-      if (!is.null(r$tdp43)) {
-        cx <- r$tdp43$sequence$context
-        l2b_card(NULL, "TDP-43 evidence",
-          "Two independent kinds, kept separate on purpose — a dataset that cannot answer must never read as \"not bound\".",
+      if (!is.null(r$evidence)) {
+        ev <- r$evidence; inf <- ev$info; cx <- ev$sequence$context
+        rna <- if (is.na(inf$rna)) "motif" else inf$rna
+        l2b_card(NULL, sprintf("%s evidence", inf$label),
+          "Two independent kinds, kept separate on purpose \u2014 a dataset that cannot answer must never read as \"not bound\".",
           div(class = "l2b-aside-note",
             tags$b("Sequence: "),
-            sprintf("UG density %.0f%% upstream of the exon vs %.0f%% downstream (%.1f×)%s.",
-                    100 * cx$upstream, 100 * cx$downstream, cx$ratio,
-                    if (!is.na(cx$ratio) && cx$ratio >= 2 && cx$upstream >= 0.10)
-                      " — the asymmetry TDP-43 repression usually shows" else ""),
-            if (!is.null(cx$blocks) && nrow(cx$blocks) && any(cx$blocks$side == "upstream")) {
-              ub <- cx$blocks[cx$blocks$side == "upstream", , drop = FALSE]
-              sprintf(" Nearest UG-rich block %d nt upstream, peaking at %.0f%%.",
-                      abs(ub$distance[1]), 100 * ub$peak_density[1])
-            } else "",
-            if (nrow(r$tdp43$sequence$repeats) && any(r$tdp43$sequence$repeats$near))
-              sprintf(" A perfect (UG)%d run sits %d nt away.",
-                      r$tdp43$sequence$repeats$units[r$tdp43$sequence$repeats$near][1],
-                      abs(r$tdp43$sequence$repeats$distance[r$tdp43$sequence$repeats$near][1]))
-            else " No perfect (UG)n tandem run nearby, which is normal — most real sites are UG-rich rather than tandem."),
+            if (is.null(cx)) sprintf(
+              "No established consensus motif is registered for %s, so there is no sequence measure. That is a gap in what has been measured about the protein, not a finding about this exon.",
+              inf$label)
+            else tagList(
+              sprintf("%s density %.1f%% upstream of the exon vs %.1f%% downstream%s.",
+                      rna, 100 * cx$upstream, 100 * cx$downstream,
+                      if (is.na(cx$ratio)) "" else sprintf(" (%.1f\u00d7)", cx$ratio)),
+              if (!is.na(cx$ratio) && cx$ratio >= 2 &&
+                  !is.na(ev$sequence$rich_gate) && cx$upstream >= ev$sequence$rich_gate)
+                tags$b(" A clear asymmetry.") else "",
+              if (!is.null(cx$blocks) && nrow(cx$blocks) && any(cx$blocks$side == "upstream")) {
+                ub <- cx$blocks[cx$blocks$side == "upstream", , drop = FALSE]
+                sprintf(" Nearest %s-rich block %d nt upstream, peaking at %.1f%%.",
+                        rna, abs(ub$distance[1]), 100 * ub$peak_density[1])
+              } else "",
+              # The tandem line exists only for proteins with a documented
+              # tandem form, and is named after the repeat unit, not the motif.
+              if (!is.null(inf$tandem)) {
+                unit <- chartr("T", "U", inf$tandem)
+                rp <- ev$sequence$repeats
+                if (!is.null(rp) && nrow(rp) && any(rp$near)) {
+                  k <- which(rp$near)[1]
+                  sprintf(" A perfect (%s)%d run %s.", unit, rp$units[k],
+                          if (rp$distance[k] == 0) "sits inside the exon"
+                          else sprintf("sits %d nt away", abs(rp$distance[k])))
+                } else sprintf(" No perfect (%s)n tandem run nearby, which is normal \u2014 most real sites are %s-rich rather than tandem.", unit, rna)
+              } else "",
+              if (is.na(inf$where)) "" else
+                tags$span(style = "opacity:.8;", sprintf(" Where %s acts: %s.", inf$label, inf$where)))),
           div(class = "l2b-aside-note", style = "margin-top:8px;",
-            tags$b("Measured binding: "), r$tdp43$clip$note))
+            tags$b("Measured binding: "), ev$clip$note))
       },
 
       if (!is.null(r$sites)) l2b_card(NULL, "Every annotated splice site in this transcript",

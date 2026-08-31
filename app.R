@@ -64,11 +64,15 @@ source("R/dilution.R")
 source("R/plasmid_creator.R")
 source("R/plasmid_map.R")
 # The splice layer, in dependency order: pure scoring, then the matrix builder
-# that feeds it, then the optional third-party second opinion. Sourced before
-# cryptic_exon_bam.R / cryptic_tile.R, which both call into it.
+# that feeds it, then the optional third-party second opinion, then the
+# RNA-binding-protein layer (which motif each protein reads, which published
+# experiment answers for it, and the peak lookup that reads those experiments).
+# Sourced before cryptic_exon_bam.R / cryptic_tile.R, which both call into it.
 source("R/splice_score.R")
 source("R/splice_pwm.R")
 source("R/splice_ai.R")
+source("R/rbp_catalog.R")
+source("R/rbp_motifs.R")
 source("R/clip_peaks.R")
 source("R/splice_code.R")
 source("R/cryptic_exon_bam.R")

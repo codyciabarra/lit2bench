@@ -60,14 +60,18 @@ the box — no hunting down Bioconductor packages by hand.
   scored for **splice-site strength** against the annotated sites in the same
   gene (weak-for-this-gene is what a repressed cryptic site looks like), with an
   optional SpliceAI second opinion on a single site; any candidate exon can be
-  checked for **TDP-43 evidence** — strand-aware UG richness plus measured
-  ENCODE eCLIP binding.
+  checked for **RNA-binding-protein evidence** — strand-aware motif richness plus
+  measured ENCODE eCLIP binding, for whichever of 176 proteins you pick.
 - **Splice Code** — why an exon here would be silent at all: scores every splice
   site in a transcript against a matrix built by counting real annotated sites,
   so a cryptic site's rank among the gene's own is visible (weak-for-this-gene is
   the signature). Adds the polypyrimidine tract, the branch-point consensus, and
-  two kinds of TDP-43 evidence — strand-aware UG richness, and measured binding
-  from ENCODE eCLIP. No BAMs needed.
+  two independent kinds of binding evidence — strand-aware motif richness, and
+  measured binding from ENCODE eCLIP. **176 RNA-binding proteins**: TDP-43 is the
+  default, and RBFOX2, PTBP1, hnRNP C, NOVA, MBNL1, QKI, U2AF2, SRSF1, FUS and
+  167 others are one dropdown away. Only the binding evidence depends on that
+  choice — splice-site strength, the percentiles, the tract and the branch point
+  are the same whichever protein you pick. No BAMs needed.
 - **Protein Consequence** — takes a cryptic exon and works out what it does to
   the protein: splices it into the real annotated transcript, translates from the
   annotated start codon, and reports the frameshift, the premature stop, whether

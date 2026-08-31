@@ -486,12 +486,17 @@ server_cryptic <- function(input, output, session, ctx) {
                 actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;"),
                 div(style = "margin-top:14px; padding-top:14px; border-top:1px solid var(--l2b-border);",
                   p(class = "l2b-card-sub",
-                    "Why would this exon normally be silent? Reports two independent kinds of TDP-43 evidence for the ",
-                    "selected span: ", tags$b("sequence"), " — UG-repeat runs and strand-aware UG richness upstream vs ",
-                    "downstream, measured against this locus' own background — and ", tags$b("measured binding"),
+                    "Why would this exon normally be silent? Reports two independent kinds of evidence for the ",
+                    "selected span and the protein you pick: ", tags$b("sequence"), " — motif richness upstream vs ",
+                    "downstream measured against this locus' own background, plus tandem repeat runs for the proteins ",
+                    "that have a documented tandem form — and ", tags$b("measured binding"),
                     " from published ENCODE eCLIP. Those experiments are in K562 and HepG2, so for a neuronal gene they ",
                     "often cannot answer at all; that is reported as its own state and never as \"not bound\"."),
-                  actionButton("cryptic_tdp43_go", "TDP-43 evidence for selected exon", class = "btn-ghost", style = "width:auto;"),
+                  div(style = "display:flex; gap:10px; align-items:center; flex-wrap:wrap;",
+                    div(style = "min-width:230px;",
+                      selectizeInput("cryptic_rbp", NULL, choices = NULL, selected = "TARDBP", width = "100%",
+                                     options = list(placeholder = "Search 176 proteins\u2026"))),
+                    actionButton("cryptic_rbp_go", "Binding evidence for selected exon", class = "btn-ghost", style = "width:auto;")),
                   uiOutput("cryptic_tdp43_out"))
               ),
               tabPanel(tagList("Retained introns (", textOutput("cryptic_n_ri", inline = TRUE), ")"),
@@ -711,38 +716,67 @@ server_cryptic <- function(input, output, session, ctx) {
     cryptic_spliceai(out)
   })
 
-  # ---- TDP-43 evidence for a selected candidate exon ----------------------
+  # ---- binding evidence for a selected candidate exon ---------------------
+  # The protein is a choice here exactly as it is in Splice Code; TDP-43 stays
+  # the default. Only this block depends on it -- detection, the sashimi figure
+  # and every other tab are protein-independent.
+  local({
+    o <- rbp_options()
+    grp <- ifelse(o$has_motif & o$has_clip, "Binding motif and measured eCLIP",
+           ifelse(o$has_motif, "Binding motif only (no ENCODE eCLIP)",
+                               "Measured eCLIP only (no registered motif)"))
+    updateSelectizeInput(session, "cryptic_rbp", server = TRUE, selected = "TARDBP",
+      choices = data.frame(value = o$symbol,
+                           label = ifelse(o$label == o$symbol, o$symbol,
+                                          sprintf("%s \u2014 %s", o$symbol, o$label)),
+                           optgroup = grp, stringsAsFactors = FALSE))
+  })
+
   cryptic_tdp43 <- reactiveVal(NULL)
   observeEvent(cryptic_res(), cryptic_tdp43(NULL))   # an answer is about ONE span
   output$cryptic_tdp43_out <- renderUI({
     ev <- cryptic_tdp43()
     if (is.null(ev)) return(NULL)
     if (!is.null(ev$error)) return(l2b_warn(ev$error))
-    cx <- ev$sequence$context
+    inf <- ev$info; cx <- ev$sequence$context
+    rna <- if (is.na(inf$rna)) "motif" else inf$rna
     # Sequence and measured evidence are shown as two separate lines on purpose:
     # collapsing them into one score would let "no CLIP coverage" read as a
     # negative, which is the one thing clip_peaks.R exists to prevent.
     div(style = "margin-top:10px;",
+      div(class = "l2b-aside-note", style = "font-weight:600;", inf$label),
       div(class = "l2b-aside-note",
         tags$b("Sequence: "),
-        sprintf("UG density %.0f%% upstream vs %.0f%% downstream (%.1f\u00d7)%s.",
-                100 * cx$upstream, 100 * cx$downstream, cx$ratio,
-                if (!is.na(cx$ratio) && cx$ratio >= 2 && cx$upstream >= 0.10)
-                  " \u2014 the asymmetry TDP-43 repression usually shows" else ""),
-        if (!is.null(cx$blocks) && nrow(cx$blocks) &&
-            any(cx$blocks$side == "upstream")) {
-          ub <- cx$blocks[cx$blocks$side == "upstream", , drop = FALSE]
-          sprintf(" Nearest UG-rich block %d nt upstream, peaking at %.0f%%.",
-                  abs(ub$distance[1]), 100 * ub$peak_density[1])
-        } else "",
-        if (nrow(ev$sequence$repeats) && any(ev$sequence$repeats$near))
-          sprintf(" A perfect (UG)%d run sits %d nt away.",
-                  ev$sequence$repeats$units[ev$sequence$repeats$near][1], abs(ev$sequence$repeats$distance[ev$sequence$repeats$near][1]))
-        else " No perfect (UG)n tandem run nearby, which is normal \u2014 most real sites are UG-rich rather than tandem."),
+        if (is.null(cx)) sprintf(
+          "No established consensus motif is registered for %s, so there is no sequence measure. That is a gap in what has been measured about the protein, not a finding about this exon.",
+          inf$label)
+        else tagList(
+          sprintf("%s density %.1f%% upstream vs %.1f%% downstream%s.",
+                  rna, 100 * cx$upstream, 100 * cx$downstream,
+                  if (is.na(cx$ratio)) "" else sprintf(" (%.1f\u00d7)", cx$ratio)),
+          if (!is.na(cx$ratio) && cx$ratio >= 2 &&
+              !is.na(ev$sequence$rich_gate) && cx$upstream >= ev$sequence$rich_gate)
+            tags$b(" A clear asymmetry.") else "",
+          if (!is.null(cx$blocks) && nrow(cx$blocks) && any(cx$blocks$side == "upstream")) {
+            ub <- cx$blocks[cx$blocks$side == "upstream", , drop = FALSE]
+            sprintf(" Nearest %s-rich block %d nt upstream, peaking at %.1f%%.",
+                    rna, abs(ub$distance[1]), 100 * ub$peak_density[1])
+          } else "",
+          if (!is.null(inf$tandem)) {
+            unit <- chartr("T", "U", inf$tandem); rp <- ev$sequence$repeats
+            if (!is.null(rp) && nrow(rp) && any(rp$near)) {
+              k <- which(rp$near)[1]
+              sprintf(" A perfect (%s)%d run %s.", unit, rp$units[k],
+                      if (rp$distance[k] == 0) "sits inside the exon"
+                      else sprintf("sits %d nt away", abs(rp$distance[k])))
+            } else sprintf(" No perfect (%s)n tandem run nearby, which is normal \u2014 most real sites are %s-rich rather than tandem.", unit, rna)
+          } else "",
+          if (is.na(inf$where)) "" else
+            tags$span(style = "opacity:.8;", sprintf(" Where %s acts: %s.", inf$label, inf$where)))),
       div(class = "l2b-aside-note", style = "margin-top:8px;",
         tags$b("Measured binding: "), ev$clip$note))
   })
-  observeEvent(input$cryptic_tdp43_go, {
+  observeEvent(input$cryptic_rbp_go, {
     req(cryptic_res())
     sel <- input$cryptic_exon_tbl_rows_selected
     if (is.null(sel) || length(sel) == 0) {
@@ -750,16 +784,17 @@ server_cryptic <- function(input, output, session, ctx) {
     }
     r <- cryptic_res(); df <- r$candidates$candidate_exons[sel, ]
     strand <- if (!is.null(r$transcript) && !is.null(r$transcript$strand)) r$transcript$strand[1] else "+"
-    l2b_log("tdp43_evidence", tool = "cryptic")   # not a run -- reports on an existing result
-    withProgress(message = "Reading TDP-43 evidence...", value = 0.4, {
+    rbp <- input$cryptic_rbp %||% "TARDBP"
+    l2b_log("rbp_evidence", tool = "cryptic", rbp = toupper(rbp))   # not a run -- reports on an existing result
+    withProgress(message = sprintf("Reading %s evidence...", rbp_info(rbp)$label), value = 0.4, {
       out <- tryCatch({
         flank <- 3000L
         win <- fetch_genomic(r$chrom, df$start - flank, df$end + flank, assembly = input$cryptic_assembly)
-        tdp43_evidence(r$chrom, df$start, df$end, strand,
-                       window_seq = win, window_start = df$start - flank,
-                       assembly = input$cryptic_assembly,
-                       gene_start = r$orig_start, gene_end = r$orig_end,
-                       progress = function(m) incProgress(0.1, detail = m))
+        rbp_evidence(r$chrom, df$start, df$end, strand, rbp = rbp,
+                     window_seq = win, window_start = df$start - flank,
+                     assembly = input$cryptic_assembly,
+                     gene_start = r$orig_start, gene_end = r$orig_end,
+                     progress = function(m) incProgress(0.1, detail = m))
       }, error = function(e) list(error = conditionMessage(e)))
     })
     cryptic_tdp43(out)
