@@ -482,6 +482,13 @@ server_cryptic <- function(input, output, session, ctx) {
               tabPanel(tagList("Candidate exons (", textOutput("cryptic_n_ce", inline = TRUE), ")"),
                 br(),
                 DTOutput("cryptic_exon_tbl"),
+                p(class = "l2b-card-sub",
+                  tags$b("What the tier means: "),
+                  "it grades the two flanking junctions — whether each is anchored to a known splice site and carries a ",
+                  "canonical motif. It does ", tags$b("not"), " grade the span. Measured against 94 published cryptic exons, ",
+                  "a called span overlapped the real one about 10% of the time, and when it missed, the nearest candidate sat ",
+                  "a median of ~11 kb away. Treat the locus as the finding and the coordinates as a starting point — ",
+                  "check the span on the plot before ordering anything against it."),
                 p(class = "l2b-card-sub", "Select a span row above, then jump straight to the Primer Designer — no manual coordinate entry."),
                 actionButton("cryptic_design_exon_go", "Design primers for selected exon →", class = "btn-alt", style = "width:auto;"),
                 div(style = "margin-top:14px; padding-top:14px; border-top:1px solid var(--l2b-border);",
@@ -599,10 +606,15 @@ server_cryptic <- function(input, output, session, ctx) {
   output$cryptic_exon_tbl <- renderDT({
     req(cryptic_res()); df <- cryptic_res()$candidates$candidate_exons
     if (nrow(df) == 0) return(l2b_result_table(data.frame(Message = "None found at the current thresholds.")))
+    # "Junction confidence", not "Confidence": the tier grades the two flanking
+    # JUNCTIONS (anchored to a known site? canonical motif?) and says nothing
+    # about whether the SPAN between them is the right one. Validation against
+    # 94 published cryptic exons put span accuracy near 10%, so a bare
+    # "Confidence: High" here reads as a promise the number cannot make.
     out <- data.frame(
       Span = sprintf("%s:%s-%s", cryptic_res()$chrom, format(df$start, big.mark = ","), format(df$end, big.mark = ",")),
       `Length (bp)` = df$length, `KD reads` = df$kd_reads, `Control reads` = df$control_reads,
-      Confidence = tools::toTitleCase(df$confidence), check.names = FALSE)
+      `Junction confidence` = tools::toTitleCase(df$confidence), check.names = FALSE)
     datatable(out, rownames = FALSE, selection = "single", options = list(dom = "t", paging = FALSE, ordering = FALSE))
   }, server = TRUE)
   output$cryptic_retention_tbl <- renderDT({
