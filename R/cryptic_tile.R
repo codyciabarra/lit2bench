@@ -241,9 +241,19 @@ run_cryptic_detection_tiled <- function(bundle, locus, thresholds, n_bins = 800)
     control_n_reads = control_track$n_reads, kd_n_reads = kd_track$n_reads,
     known_exons = known_exons)
 
+  # Coverage evidence for the intervals the junction channel nominated. This
+  # SCORES candidates, it does not search for them -- three discovery designs
+  # were built and measured, and all three failed at this effect size (see
+  # cryptic_coverage.R's header). Scoring a nominated interval is the regime the
+  # signal was validated in, and where two-channel agreement measured a 0.0%
+  # false-positive rate.
   res <- build_cryptic_result(locus, control_track, kd_track, transcripts, candidates)
   res$differential <- diff_tbl
   res$retained_introns <- retained_introns
+  res$candidates$candidate_exons <- apply_coverage_support(coverage_support(
+    res$candidates$candidate_exons, control_track$coverage_rle, kd_track$coverage_rle,
+    locus$start, locus$end, known_junc, known_exons = known_exons,
+    control_n_reads = control_track$n_reads, kd_n_reads = kd_track$n_reads))
   res$thresholds <- thresholds
 
   # exons_skipped is computed against the SAME primary transcript

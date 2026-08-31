@@ -76,6 +76,10 @@ source("R/rbp_motifs.R")
 source("R/clip_peaks.R")
 source("R/splice_code.R")
 source("R/cryptic_exon_bam.R")
+# The second detection channel: cryptic exons found by body coverage rather
+# than by flanking junctions. Pure arithmetic over the tile's coverage vectors,
+# so it sits on the cheap side of the split with the rest of detection.
+source("R/cryptic_coverage.R")
 source("R/cryptic_tile.R")
 source("R/differential_splicing.R")
 source("R/sashimi_plot.R")
