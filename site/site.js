@@ -22,10 +22,10 @@
    * button was dead. Bump `version` and `asset` together when you tag.
    */
   var RELEASE = {
-    version: '0.5.0',
-    size: '~1.6 MB',
+    version: '0.6.0',
+    size: '~1.7 MB',
     repo: 'https://github.com/codyciabarra/lit2bench',
-    asset: 'Lit2Bench-0.5.0.dmg'
+    asset: 'Lit2Bench-0.6.0.dmg'
   };
   RELEASE.url = RELEASE.repo + '/releases/latest/download/' + RELEASE.asset;
 
